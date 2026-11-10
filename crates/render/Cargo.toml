@@ -7,3 +7,6 @@ edition.workspace = true
 litehtml.workspace = true
 mail-parser.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

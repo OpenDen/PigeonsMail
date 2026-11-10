@@ -46,6 +46,7 @@ mailthin-render = { path = "crates/render" }
 
 [patch.crates-io]
 litehtml-sys = { path = "vendor/litehtml-sys" }
+litehtml = { path = "vendor/litehtml" }
 
 [profile.release]
 opt-level = "s"

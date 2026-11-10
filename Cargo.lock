@@ -2925,8 +2925,6 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "litehtml"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "644e44fa76f6191cbd110acdd675072372fc0e4201c5eb2535a65723017be85b"
 dependencies = [
  "base64 0.22.1",
  "cosmic-text",
@@ -3085,6 +3083,7 @@ name = "mailthin-render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "litehtml",
  "mail-parser",
 ]

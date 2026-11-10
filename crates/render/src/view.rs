@@ -407,4 +407,24 @@ mod tests {
         v.resize(200, 80);
         assert_eq!(v.blocked_remote_images(), 0);
     }
+
+    #[test]
+    fn images_are_scaled_to_their_laid_out_size() {
+        // 40x40 solid red PNG shown in a 10x10 box must not spill outside it.
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(40, 40, image::Rgb([255, 0, 0]))
+            .write_to(&mut bmp, image::ImageFormat::Png)
+            .unwrap();
+        let bmp = bmp.into_inner();
+        let html = "<img src=\"https://x.example/a.bmp\" width=\"10\" height=\"10\">";
+        let mut v = EmailView::new(&email(html), 100, 60, 1.0).unwrap();
+        v.load_remote_images(vec![("https://x.example/a.bmp".to_string(), bmp)]);
+        let f = v.render_viewport(0);
+        let red = |x: usize, y: usize| {
+            let i = (y * 100 + x) * 4;
+            f.rgba[i] > 200 && f.rgba[i + 1] < 60
+        };
+        assert!(red(5, 5));
+        assert!(!red(20, 20), "image drawn at natural size instead of scaled");
+    }
 }

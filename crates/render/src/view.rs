@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use anyhow::{anyhow, Result};
 use litehtml::email::{prepare_email_html, EMAIL_MASTER_CSS};
 use litehtml::pixbuf::PixbufContainer;
+use litehtml::selection::Selection;
 use litehtml::{Document, DocumentContainer, DrawContext, Position};
 
 use crate::mime::{text_to_html, ParsedEmail};
@@ -31,6 +32,9 @@ pub struct EmailView {
     content_height: f32,
     remote_images: Vec<String>,
     loaded_remote: HashSet<String>,
+    /// Document-coordinate selection; its element pointers are only valid for `doc`, so it is
+    /// cleared on every relayout.
+    selection: Selection<'static>,
 }
 
 impl EmailView {
@@ -40,7 +44,8 @@ impl EmailView {
         let height = height.max(1);
         let scale = if scale.is_finite() && scale >= 1.0 { scale.min(4.0) } else { 1.0 };
 
-        let source = email.html.clone().unwrap_or_else(|| text_to_html(""));
+        let empty = text_to_html("");
+        let source = email.html.as_deref().unwrap_or(&empty);
         // The body is already UTF-8; the BOM stops `<meta charset>` from triggering a re-decode.
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(source.as_bytes());
@@ -77,6 +82,7 @@ impl EmailView {
             content_height: 0.0,
             remote_images: Vec::new(),
             loaded_remote: HashSet::new(),
+            selection: Selection::new(),
         };
         view.relayout();
 
@@ -105,6 +111,7 @@ impl EmailView {
     }
 
     fn relayout(&mut self) {
+        self.selection.clear();
         let width = self.width as f32;
         let doc = self.doc.as_mut().expect("document is present until drop");
         let _ = doc.render(width);
@@ -115,6 +122,20 @@ impl EmailView {
         self.content_height.ceil() as u32
     }
 
+    /// Resize without reparsing the message or discarding decoded images.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let (width, height) = (width.max(1), height.max(1));
+        if (width, height) == (self.width, self.height) {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.with_container(|c| c.resize(width, height));
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        doc.media_changed();
+        self.relayout();
+    }
+
     /// Remote image URLs referenced by the message (not loaded unless provided via
     /// [`load_remote_images`](Self::load_remote_images)).
     pub fn remote_images(&self) -> &[String] {
@@ -123,6 +144,10 @@ impl EmailView {
 
     pub fn blocked_remote_images(&self) -> usize {
         self.remote_images.iter().filter(|u| !self.loaded_remote.contains(*u)).count()
+    }
+
+    pub fn unloaded_remote_images(&self) -> impl Iterator<Item = &String> {
+        self.remote_images.iter().filter(|u| !self.loaded_remote.contains(*u))
     }
 
     /// Supplies downloaded remote images and re-lays out the document.
@@ -143,9 +168,30 @@ impl EmailView {
 
     /// Renders the part of the document starting `scroll_y` pixels from the top.
     pub fn render_viewport(&mut self, scroll_y: u32) -> Frame {
+        self.render_viewport_with(scroll_y, |width, height, premul| Frame {
+            width,
+            height,
+            rgba: flatten_on_white(premul),
+        })
+    }
+
+    /// Draw a viewport and expose its premultiplied RGBA pixels to the callback.
+    pub fn render_viewport_with<R>(
+        &mut self,
+        scroll_y: u32,
+        f: impl FnOnce(u32, u32, &[u8]) -> R,
+    ) -> R {
         let (w, h, scale) = (self.width, self.height, self.scale);
         let max_scroll = self.content_height().saturating_sub(h);
         let scroll = scroll_y.min(max_scroll) as f32;
+
+        // Selection rectangles are in document coordinates; move them into the viewport.
+        let rects: Vec<Position> = self
+            .selection
+            .rectangles()
+            .iter()
+            .map(|r| Position { x: r.x, y: r.y - scroll, width: r.width, height: r.height })
+            .collect();
 
         // Resizing clears the pixmap, so frames never accumulate on each other.
         self.with_container(|c| c.resize_with_scale(w, h, scale));
@@ -156,9 +202,11 @@ impl EmailView {
             -scroll,
             Some(Position { x: 0.0, y: 0.0, width: w as f32, height: h as f32 }),
         );
+        if !rects.is_empty() {
+            self.with_container(|c| c.draw_selection_rects(&rects));
+        }
 
-        let (pw, ph, rgba) = self.with_container(|c| (c.width(), c.height(), flatten_on_white(c.pixels())));
-        Frame { width: pw, height: ph, rgba }
+        self.with_container(|c| f(c.width(), c.height(), c.pixels()))
     }
 
     /// Whether the mouse is over a link (for the cursor shape).
@@ -174,15 +222,43 @@ impl EmailView {
     pub fn link_at(&mut self, x: f32, y: f32, scroll_y: u32) -> Option<String> {
         let doc_y = y + scroll_y as f32;
         let doc = self.doc.as_mut().expect("document is present until drop");
+        // litehtml only arms a link on press when it already knows the pointer is over it.
+        doc.on_mouse_over(x, doc_y, x, y);
         doc.on_lbutton_down(x, doc_y, x, y);
         doc.on_lbutton_up(x, doc_y, x, y);
         let url = self.with_container(|c| c.take_anchor_click())?;
         safe_link(&url)
     }
+
+    /// Starts a text selection at viewport coordinates `(x, y)`.
+    pub fn selection_start(&mut self, x: f32, y: f32, scroll_y: u32) {
+        let doc_y = y + scroll_y as f32;
+        let measure = self.with_container(|c| c.text_measure_fn());
+        let doc = self.doc.as_ref().expect("document is present until drop");
+        self.selection.start_at(doc, &measure, x, doc_y, x, y);
+    }
+
+    /// Extends the current selection to viewport coordinates `(x, y)`.
+    pub fn selection_extend(&mut self, x: f32, y: f32, scroll_y: u32) {
+        let doc_y = y + scroll_y as f32;
+        let measure = self.with_container(|c| c.text_measure_fn());
+        let doc = self.doc.as_ref().expect("document is present until drop");
+        self.selection.extend_to(doc, &measure, x, doc_y, x, y);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// The selected plain text, or `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection.selected_text().filter(|t| !t.is_empty())
+    }
 }
 
 impl Drop for EmailView {
     fn drop(&mut self) {
+        self.selection.clear();
         self.doc.take();
         // SAFETY: `container` came from `Box::into_raw` and the document borrowing it is gone.
         unsafe { drop(Box::from_raw(self.container)) };
@@ -205,15 +281,21 @@ pub fn safe_link(url: &str) -> Option<String> {
 
 /// Converts premultiplied RGBA into opaque RGBA by compositing over a white background.
 fn flatten_on_white(premul: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(premul.len());
-    for px in premul.chunks_exact(4) {
-        let inv = 255 - px[3] as u16;
-        out.push((px[0] as u16 + inv).min(255) as u8);
-        out.push((px[1] as u16 + inv).min(255) as u8);
-        out.push((px[2] as u16 + inv).min(255) as u8);
-        out.push(255);
-    }
+    let mut out = vec![0; premul.len()];
+    flatten_on_white_into(premul, &mut out);
     out
+}
+
+/// Composite premultiplied pixels into an equally sized opaque RGBA buffer.
+pub fn flatten_on_white_into(premul: &[u8], out: &mut [u8]) {
+    assert_eq!(premul.len(), out.len());
+    for (px, dst) in premul.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+        let inv = 255 - px[3] as u16;
+        dst[0] = (px[0] as u16 + inv).min(255) as u8;
+        dst[1] = (px[1] as u16 + inv).min(255) as u8;
+        dst[2] = (px[2] as u16 + inv).min(255) as u8;
+        dst[3] = 255;
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +331,12 @@ mod tests {
         assert_eq!(f.rgba.len(), 400 * 200 * 4);
         assert!(f.rgba.chunks_exact(4).all(|p| p[3] == 255));
         assert!(f.rgba.chunks_exact(4).any(|p| p[0] < 128), "expected dark text pixels");
+        let direct = v.render_viewport_with(0, |w, h, premul| {
+            let mut output = vec![0; (w * h * 4) as usize];
+            flatten_on_white_into(premul, &mut output);
+            output
+        });
+        assert_eq!(f.rgba, direct);
     }
 
     #[test]
@@ -264,6 +352,19 @@ mod tests {
     }
 
     #[test]
+    fn resize_reuses_document_and_matches_fresh_layout() {
+        let body = email("<p>A long line of text that should wrap differently in a narrow viewport.</p>");
+        let mut view = EmailView::new(&body, 350, 150, 1.0).unwrap();
+        view.resize(180, 90);
+        let mut fresh = EmailView::new(&body, 180, 90, 1.0).unwrap();
+        assert_eq!(view.content_height(), fresh.content_height());
+        assert_eq!(view.render_viewport(0).rgba, fresh.render_viewport(0).rgba);
+        view.resize(350, 150);
+        let mut fresh = EmailView::new(&body, 350, 150, 1.0).unwrap();
+        assert_eq!(view.render_viewport(0).rgba, fresh.render_viewport(0).rgba);
+    }
+
+    #[test]
     fn link_hit_testing_returns_href_and_ignores_unsafe_schemes() {
         let html = "<p><a href=\"https://example.com/x\">Click this long link text</a></p>\
                     <p style=\"margin-top:40px\"><a href=\"javascript:evil()\">Bad link text here</a></p>";
@@ -274,12 +375,36 @@ mod tests {
     }
 
     #[test]
+    fn link_click_works_without_a_prior_hover() {
+        let html = "<p><a href=\"https://example.com/y\">Open me</a></p>";
+        let mut v = EmailView::new(&email(html), 400, 300, 1.0).unwrap();
+        assert_eq!(v.link_at(10.0, 8.0, 0).as_deref(), Some("https://example.com/y"));
+    }
+
+    #[test]
+    fn drag_selection_copies_text_between_points() {
+        let html = "<p>Alpha beta gamma delta epsilon</p>";
+        let mut v = EmailView::new(&email(html), 400, 200, 1.0).unwrap();
+        assert_eq!(v.selected_text(), None);
+        v.selection_start(2.0, 8.0, 0);
+        v.selection_extend(200.0, 8.0, 0);
+        let text = v.selected_text().expect("selection should contain text");
+        assert!(text.contains("Alpha"), "selected: {text:?}");
+        let f = v.render_viewport(0);
+        assert!(f.rgba.chunks_exact(4).all(|p| p[3] == 255));
+        v.clear_selection();
+        assert_eq!(v.selected_text(), None);
+    }
+
+    #[test]
     fn remote_images_are_reported_but_blocked_until_provided() {
         let html = "<p>hi</p><img src=\"https://tracker.example/p.gif\" width=\"5\" height=\"5\">";
         let mut v = EmailView::new(&email(html), 300, 100, 1.0).unwrap();
         assert_eq!(v.remote_images(), ["https://tracker.example/p.gif"]);
         assert_eq!(v.blocked_remote_images(), 1);
         v.load_remote_images(vec![("https://tracker.example/p.gif".to_string(), Vec::new())]);
+        assert_eq!(v.blocked_remote_images(), 0);
+        v.resize(200, 80);
         assert_eq!(v.blocked_remote_images(), 0);
     }
 }

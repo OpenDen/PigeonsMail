@@ -88,7 +88,16 @@ impl Resolve for PublicOnlyResolver {
     }
 }
 
-fn client() -> Result<reqwest::Client> {
+/// Shared by every image fetch, so the connection pool and TLS sessions are reused.
+fn client() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| build_client().map_err(|e| e.to_string()))
+        .as_ref()
+        .map_err(|e| anyhow!("cannot create HTTP client: {e}"))
+}
+
+fn build_client() -> reqwest::Result<reqwest::Client> {
     let redirects = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS || validate_url(attempt.url()).is_err() {
             attempt.stop()
@@ -96,13 +105,13 @@ fn client() -> Result<reqwest::Client> {
             attempt.follow()
         }
     });
-    Ok(reqwest::Client::builder()
+    reqwest::Client::builder()
         .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
         .redirect(redirects)
         .timeout(TIMEOUT)
         .referer(false)
         .user_agent("Mozilla/5.0")
-        .build()?)
+        .build()
 }
 
 /// Downloads one remote image. Returns an error for anything that is not a small image over HTTPS.

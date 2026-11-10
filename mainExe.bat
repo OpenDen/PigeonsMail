@@ -1,2 +1,3 @@
 . .\scripts\dev-env.ps1
-cargo run -p mailthin-app
+cargo build --release -p mailthin-app
+.\target\release\mailthin-app.exe

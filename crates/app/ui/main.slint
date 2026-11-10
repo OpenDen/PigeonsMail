@@ -134,6 +134,9 @@ export component MainWindow inherits Window {
     callback viewport-resized(length, length);
     callback body-scrolled(length);
     callback body-clicked(length, length);
+    callback body-pressed(length, length);
+    callback body-dragged(length, length);
+    callback copy-selection();
     callback body-hover(length, length);
     callback toggle-remote();
     callback open-link();
@@ -171,7 +174,14 @@ export component MainWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || root.show-add-account || root.show-remove-account) {
+            if (root.show-add-account || root.show-remove-account) {
+                return reject;
+            }
+            if (event.modifiers.control && (event.text == "c" || event.text == "\u{3}")) {
+                root.copy-selection();
+                return accept;
+            }
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                 return reject;
             }
             if (event.text == "e") { root.archive(); return accept; }
@@ -499,6 +509,12 @@ export component MainWindow inherits Window {
                                 pointer-event(e) => {
                                     if (e.kind == PointerEventKind.move) {
                                         root.body-hover(self.mouse-x, self.mouse-y);
+                                        if (self.pressed) {
+                                            root.body-dragged(self.mouse-x, self.mouse-y);
+                                        }
+                                    } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                        keys.focus();
+                                        root.body-pressed(self.mouse-x, self.mouse-y);
                                     }
                                 }
                                 clicked => {

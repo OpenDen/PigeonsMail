@@ -1,5 +1,5 @@
-//! One lightweight async task per account: initial sync, then IMAP IDLE (or polling) with
-//! commands multiplexed in via `tokio::select!`.
+//! Per-account sync and on-demand body tasks: initial sync, then IMAP IDLE (or polling),
+//! with interactive message downloads on a separate connection.
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -19,6 +19,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKOFF_MIN: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const BODY_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Called before every (re)connect so OAuth access tokens can be refreshed.
 pub type CredentialProvider = Arc<dyn Fn() -> BoxFuture<'static, Result<Credential>> + Send + Sync>;
@@ -72,27 +74,47 @@ pub enum AccountCommand {
 
 pub struct AccountHandle {
     commands: mpsc::Sender<AccountCommand>,
+    body_commands: mpsc::Sender<(String, u32)>,
     task: JoinHandle<()>,
+    body_task: JoinHandle<()>,
 }
 
 impl AccountHandle {
     pub async fn send(&self, cmd: AccountCommand) -> Result<()> {
-        self.commands.send(cmd).await.map_err(|_| anyhow::anyhow!("account worker has stopped"))
+        match cmd {
+            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self.body_commands
+                .send((folder, uid)).await.map_err(|_| anyhow::anyhow!("message download worker has stopped")),
+            other => self.commands.send(other).await.map_err(|_| anyhow::anyhow!("account worker has stopped")),
+        }
     }
 
     /// Non-blocking send for callers outside the async runtime (e.g. the UI thread).
     pub fn try_send(&self, cmd: AccountCommand) -> Result<()> {
-        self.commands.try_send(cmd).map_err(|e| anyhow::anyhow!("cannot reach account worker: {e}"))
+        match cmd {
+            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self.body_commands
+                .try_send((folder, uid)).map_err(|e| anyhow::anyhow!("cannot queue message download: {e}")),
+            other => self.commands.try_send(other).map_err(|e| anyhow::anyhow!("cannot reach account worker: {e}")),
+        }
     }
 
     pub async fn shutdown(self) {
+        self.body_task.abort();
         let _ = self.commands.send(AccountCommand::Shutdown).await;
         let _ = self.task.await;
+        let _ = self.body_task.await;
     }
 }
 
 pub fn spawn_account(config: AccountConfig, events: mpsc::Sender<SyncEvent>) -> AccountHandle {
     let (tx, rx) = mpsc::channel(16);
+    let (body_tx, body_rx) = mpsc::channel(16);
+    let body_task = tokio::spawn(body_worker(
+        config.account_id,
+        config.settings.clone(),
+        config.credentials.clone(),
+        events.clone(),
+        body_rx,
+    ));
     let worker = Worker {
         account_id: config.account_id,
         settings: config.settings,
@@ -104,7 +126,101 @@ pub fn spawn_account(config: AccountConfig, events: mpsc::Sender<SyncEvent>) -> 
         commands: rx,
         backoff: BACKOFF_MIN,
     };
-    AccountHandle { commands: tx, task: tokio::spawn(worker.run()) }
+    AccountHandle { commands: tx, body_commands: body_tx, task: tokio::spawn(worker.run()), body_task }
+}
+
+/// A separate, lazily connected IMAP session keeps interactive downloads independent of sync.
+async fn body_worker(
+    account_id: AccountId,
+    settings: ImapSettings,
+    credentials: CredentialProvider,
+    events: mpsc::Sender<SyncEvent>,
+    mut commands: mpsc::Receiver<(String, u32)>,
+) {
+    let mut session: Option<ImapSession> = None;
+    let mut selected: Option<String> = None;
+    loop {
+        let next = if session.is_some() {
+            match tokio::time::timeout(BODY_IDLE_TIMEOUT, commands.recv()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    session = None;
+                    selected = None;
+                    continue;
+                }
+            }
+        } else {
+            commands.recv().await
+        };
+        let Some((folder, uid)) = next else { break };
+        let result = tokio::time::timeout(BODY_FETCH_TIMEOUT, async {
+            if session.is_none() {
+                let credential = credentials().await.context("cannot obtain credentials")?;
+                session = Some(imap::connect(&settings, &credential).await?);
+            }
+            let current = session.as_mut().expect("connected above");
+            if selected.as_deref() != Some(folder.as_str()) {
+                current.select(&folder).await.with_context(|| format!("cannot select {folder}"))?;
+                selected = Some(folder.clone());
+            }
+            imap::fetch_selected_body(current, uid).await
+        }).await;
+        let event = match result {
+            Ok(Ok(raw)) => SyncEvent::BodyFetched { account_id, folder, uid, raw },
+            failure => {
+                session = None;
+                selected = None;
+                let error = match failure {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    Err(_) => "message download timed out".to_string(),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                SyncEvent::ActionFailed { account_id, folder, uid, error }
+            }
+        };
+        if events.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod body_worker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn body_requests_bypass_the_sync_queue() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (body_commands, mut body_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async {});
+        let body_task = tokio::spawn(async {});
+        let handle = AccountHandle { commands, body_commands, task, body_task };
+        handle.try_send(AccountCommand::SyncNow).unwrap();
+        handle.try_send(AccountCommand::Action(MailAction::FetchBody { folder: "INBOX".into(), uid: 42 })).unwrap();
+        assert!(matches!(command_rx.recv().await, Some(AccountCommand::SyncNow)));
+        assert_eq!(body_rx.recv().await, Some(("INBOX".into(), 42)));
+    }
+
+    #[tokio::test]
+    async fn body_worker_reports_credential_failure() {
+        let credentials: CredentialProvider = Arc::new(|| Box::pin(async {
+            Err(anyhow::anyhow!("credentials unavailable"))
+        }));
+        let settings = ImapSettings { host: "invalid".into(), port: 993, username: "test".into() };
+        let (events, mut event_rx) = mpsc::channel(1);
+        let (commands, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(body_worker(1, settings, credentials, events, rx));
+        commands.send(("INBOX".into(), 7)).await.unwrap();
+        match event_rx.recv().await.unwrap() {
+            SyncEvent::ActionFailed { folder, uid, error, .. } => {
+                assert_eq!((folder.as_str(), uid), ("INBOX", 7));
+                assert!(error.contains("credentials unavailable"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        drop(commands);
+        worker.await.unwrap();
+    }
 }
 
 #[derive(Debug)]

@@ -36,9 +36,11 @@ use crate::{AttachmentChip, MainWindow, MessageItem, SidebarItem};
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 const SYNC_WINDOW_DAYS: i64 = 30;
-/// Remote images kept in memory per open message, so a window resize can restore them.
+/// Maximum total encoded remote image bytes loaded for one message.
 const MAX_REMOTE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REMOTE_IMAGES: usize = 24;
+/// Pointer travel (in pixels) before a press becomes a text selection instead of a click.
+const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// Messages sent from background threads to the UI thread.
 enum UiMsg {
@@ -47,8 +49,31 @@ enum UiMsg {
     MessagesChanged,
     BodyReady { account_id: AccountId, folder: String, uid: u32 },
     ActionFailed { account_id: AccountId, folder: String, uid: u32, error: String },
-    RemoteImages { id: MessageId, images: Vec<(String, Vec<u8>)> },
+    RemoteImages { id: MessageId, request: u64, images: Vec<(String, Vec<u8>)>, failed: bool },
     LoginChecked { email: String, error: Option<String> },
+}
+
+struct RemoteImageBatch {
+    limit: usize,
+    total: usize,
+    images: Vec<(String, Vec<u8>)>,
+    failed: bool,
+}
+
+impl RemoteImageBatch {
+    fn new(limit: usize) -> Self {
+        Self { limit, total: 0, images: Vec::new(), failed: false }
+    }
+
+    fn add(&mut self, result: Result<(String, Vec<u8>)>) {
+        match result {
+            Ok((url, data)) if data.len() <= self.limit - self.total => {
+                self.total += data.len();
+                self.images.push((url, data));
+            }
+            Ok(_) | Err(_) => self.failed = true,
+        }
+    }
 }
 
 /// How a new account signs in. A password stays on the UI thread until the login test passes.
@@ -96,7 +121,13 @@ struct Reader {
     view: Option<EmailView>,
     scroll: u32,
     pending_link: Option<String>,
-    remote_loaded: Vec<(String, Vec<u8>)>,
+    remote_bytes: usize,
+    remote_download: Option<tokio::task::JoinHandle<()>>,
+    remote_request: Option<u64>,
+    /// Where the current mouse press started, in viewport coordinates.
+    press: Option<(f32, f32)>,
+    /// Set once the pointer moved far enough from `press` to count as a text selection.
+    dragged: bool,
 }
 
 type Handles = Arc<Mutex<HashMap<AccountId, AccountHandle>>>;
@@ -117,6 +148,7 @@ struct App {
     link_hover: bool,
     /// Body downloads in flight, so a failure can be told apart from a failed mutation.
     pending_fetches: HashSet<(AccountId, String, u32)>,
+    next_remote_request: u64,
     resize_timer: Timer,
     /// Hosts last filled in from the typed address, so they can be replaced when the address changes.
     auto_hosts: Option<ServerDefaults>,
@@ -268,6 +300,9 @@ impl App {
     // ----------------------------------------------------------------- reading pane
 
     fn close_reader(&mut self) {
+        if let Some(handle) = self.reader.as_mut().and_then(|r| r.remote_download.take()) {
+            handle.abort();
+        }
         self.reader = None;
         self.link_hover = false;
         let Some(ui) = self.ui() else { return };
@@ -341,7 +376,11 @@ impl App {
             view: None,
             scroll: 0,
             pending_link: None,
-            remote_loaded: Vec::new(),
+            remote_bytes: 0,
+            remote_download: None,
+            remote_request: None,
+            press: None,
+            dragged: false,
         });
 
         match body {
@@ -383,10 +422,7 @@ impl App {
         ui.set_attachments(ModelRc::new(VecModel::from(chips)));
 
         match EmailView::new(&parsed, w, h, scale) {
-            Ok(mut view) => {
-                if !reader.remote_loaded.is_empty() {
-                    view.load_remote_images(reader.remote_loaded.clone());
-                }
+            Ok(view) => {
                 ui.set_reader_error("".into());
                 reader.view = Some(view);
             }
@@ -395,17 +431,12 @@ impl App {
         self.render();
     }
 
-    /// Re-creates the view from the cached body (after a resize), keeping scroll position.
+    /// Re-layout the existing view after a resize, keeping its decoded images.
     fn rebuild_view(&mut self) {
-        let Some(reader) = self.reader.as_ref() else { return };
-        if reader.awaiting_body || reader.view.is_none() {
-            return;
-        }
-        let id = reader.loc.id;
-        let raw = self.store.borrow_mut().get_body(id, now_ts());
-        if let Ok(Some(raw)) = raw {
-            self.show_body(&raw);
-        }
+        let Some(reader) = self.reader.as_mut() else { return };
+        let Some(view) = reader.view.as_mut() else { return };
+        view.resize(self.viewport.0, self.viewport.1);
+        self.render();
     }
 
     fn render(&mut self) {
@@ -416,9 +447,11 @@ impl App {
 
         let total = view.content_height();
         reader.scroll = reader.scroll.min(total.saturating_sub(viewport_h));
-        let frame = view.render_viewport(reader.scroll);
-
-        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&frame.rgba, frame.width, frame.height);
+        let buf = view.render_viewport_with(reader.scroll, |width, height, premul| {
+            let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+            mailthin_render::view::flatten_on_white_into(premul, buf.make_mut_bytes());
+            buf
+        });
         ui.set_body_image(Image::from_rgba8(buf));
         ui.set_remote_blocked(view.blocked_remote_images() as i32);
 
@@ -466,14 +499,47 @@ impl App {
         }
     }
 
+    fn on_pressed(&mut self, x: f32, y: f32) {
+        let Some(reader) = self.reader.as_mut() else { return };
+        let Some(view) = reader.view.as_mut() else { return };
+        view.selection_start(x, y, reader.scroll);
+        reader.press = Some((x, y));
+        reader.dragged = false;
+        self.render();
+    }
+
+    fn on_dragged(&mut self, x: f32, y: f32) {
+        let Some(reader) = self.reader.as_mut() else { return };
+        let Some((px, py)) = reader.press else { return };
+        if !reader.dragged && (x - px).abs().max((y - py).abs()) < DRAG_THRESHOLD_PX {
+            return;
+        }
+        let Some(view) = reader.view.as_mut() else { return };
+        reader.dragged = true;
+        view.selection_extend(x, y, reader.scroll);
+        self.render();
+    }
+
     fn on_clicked(&mut self, x: f32, y: f32) {
         let Some(reader) = self.reader.as_mut() else { return };
+        // A drag that selected text is not a link click.
+        if reader.dragged {
+            return;
+        }
         let Some(view) = reader.view.as_mut() else { return };
         if let Some(url) = view.link_at(x, y, reader.scroll) {
             reader.pending_link = Some(url.clone());
             if let Some(ui) = self.ui() {
                 ui.set_pending_link(url.into());
             }
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        let text = self.reader.as_ref().and_then(|r| r.view.as_ref()).and_then(|v| v.selected_text());
+        let Some(text) = text else { return };
+        if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            self.notify(format!("Cannot copy text: {e}"));
         }
     }
 
@@ -503,48 +569,65 @@ impl App {
         let Some(ui) = self.ui() else { return };
         let Some(reader) = self.reader.as_ref() else { return };
         let Some(view) = reader.view.as_ref() else { return };
-        let urls: Vec<String> = view.remote_images().iter().take(MAX_REMOTE_IMAGES).cloned().collect();
+        if ui.get_remote_loading() {
+            return;
+        }
+        let urls: Vec<String> = view.unloaded_remote_images().take(MAX_REMOTE_IMAGES).cloned().collect();
         if urls.is_empty() {
+            return;
+        }
+        let remaining = MAX_REMOTE_BYTES.saturating_sub(reader.remote_bytes);
+        if remaining == 0 {
+            self.notify("Remote image memory limit reached for this message");
             return;
         }
         ui.set_remote_loading(true);
         let id = reader.loc.id;
+        self.next_remote_request = self.next_remote_request.wrapping_add(1);
+        let request = self.next_remote_request;
         let tx = self.ui_tx.clone();
-        self.rt.spawn(async move {
-            let images: Vec<(String, Vec<u8>)> = futures::stream::iter(urls)
+        let task = self.rt.spawn(async move {
+            let mut downloads = futures::stream::iter(urls)
                 .map(|u| async move {
-                    let data = fetch_remote_image(&u).await.ok()?;
-                    Some((u, data))
+                    fetch_remote_image(&u).await.map(|data| (u, data))
                 })
-                .buffer_unordered(4)
-                .filter_map(futures::future::ready)
-                .collect()
-                .await;
-            let _ = tx.send(UiMsg::RemoteImages { id, images });
+                .buffer_unordered(4);
+            let mut batch = RemoteImageBatch::new(remaining);
+            while let Some(result) = downloads.next().await {
+                batch.add(result);
+            }
+            let _ = tx.send(UiMsg::RemoteImages { id, request, images: batch.images, failed: batch.failed });
         });
+        if let Some(reader) = self.reader.as_mut() {
+            reader.remote_download = Some(task);
+            reader.remote_request = Some(request);
+        }
     }
 
-    fn remote_images_arrived(&mut self, id: MessageId, images: Vec<(String, Vec<u8>)>) {
+    fn remote_images_arrived(&mut self, id: MessageId, request: u64, images: Vec<(String, Vec<u8>)>, mut failed: bool) {
         let Some(ui) = self.ui() else { return };
-        ui.set_remote_loading(false);
         let Some(reader) = self.reader.as_mut() else { return };
-        if reader.loc.id != id {
+        if reader.loc.id != id || reader.remote_request != Some(request) {
             return;
         }
-        let failed = images.len() < reader.view.as_ref().map_or(0, |v| v.remote_images().len().min(MAX_REMOTE_IMAGES));
-        if let Some(view) = reader.view.as_mut() {
-            view.load_remote_images(images.clone());
-        }
-        let mut total: usize = reader.remote_loaded.iter().map(|(_, d)| d.len()).sum();
+        reader.remote_download = None;
+        reader.remote_request = None;
+        ui.set_remote_loading(false);
+        let mut accepted = Vec::new();
         for (url, data) in images {
-            if total + data.len() <= MAX_REMOTE_BYTES {
-                total += data.len();
-                reader.remote_loaded.push((url, data));
+            if data.len() <= MAX_REMOTE_BYTES.saturating_sub(reader.remote_bytes) {
+                reader.remote_bytes += data.len();
+                accepted.push((url, data));
+            } else {
+                failed = true;
             }
+        }
+        if let Some(view) = reader.view.as_mut() {
+            view.load_remote_images(accepted);
         }
         self.render();
         if failed {
-            self.notify("Some remote images could not be loaded");
+            self.notify("Some remote images could not be loaded or exceeded the message limit");
         }
     }
 
@@ -650,7 +733,7 @@ impl App {
                     self.send_command(account_id, AccountCommand::Resync { folder });
                 }
             }
-            UiMsg::RemoteImages { id, images } => self.remote_images_arrived(id, images),
+            UiMsg::RemoteImages { id, request, images, failed } => self.remote_images_arrived(id, request, images, failed),
         }
     }
 
@@ -948,6 +1031,7 @@ pub fn run() -> Result<()> {
             viewport: (600, 400),
             link_hover: false,
             pending_fetches: HashSet::new(),
+            next_remote_request: 0,
             resize_timer: Timer::default(),
             auto_hosts: None,
             pending_add: None,
@@ -1002,10 +1086,13 @@ pub fn run() -> Result<()> {
 /// every connection. A rotated refresh token returned by the provider replaces the stored one.
 fn oauth_credential_provider(provider: &'static OAuthProvider, email: String) -> Result<CredentialProvider> {
     let config = provider.client_config_from_env()?;
+    let refresh_lock = Arc::new(tokio::sync::Mutex::new(()));
     Ok(Arc::new(move || -> BoxFuture<'static, Result<Credential>> {
         let config = config.clone();
         let email = email.clone();
+        let refresh_lock = refresh_lock.clone();
         Box::pin(async move {
+            let _guard = refresh_lock.lock().await;
             let refresh = keystore::get_account_secret(&email)?
                 .ok_or_else(|| anyhow!("no stored sign-in for {email}; add the account again"))?;
             let tokens = oauth::refresh_access_token(provider, &config, &refresh).await?;
@@ -1015,6 +1102,23 @@ fn oauth_credential_provider(provider: &'static OAuthProvider, email: String) ->
             Ok(Credential::OAuth2AccessToken(tokens.access_token))
         })
     }))
+}
+
+#[cfg(test)]
+mod remote_batch_tests {
+    use super::*;
+
+    #[test]
+    fn limits_accumulated_image_bytes_and_reports_failures() {
+        let mut batch = RemoteImageBatch::new(5);
+        batch.add(Ok(("first".into(), vec![1; 3])));
+        batch.add(Ok(("too-large".into(), vec![2; 3])));
+        batch.add(Ok(("second".into(), vec![3; 2])));
+        batch.add(Err(anyhow!("network error")));
+        assert_eq!(batch.total, 5);
+        assert_eq!(batch.images.len(), 2);
+        assert!(batch.failed);
+    }
 }
 
 /// Runs the browser sign-in, tests the IMAP login with the new access token, and stores the
@@ -1054,7 +1158,10 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     on!(on_viewport_resized, |app, w, h| app.on_viewport_resized(w, h));
     on!(on_body_scrolled, |app, dy| app.on_scrolled(dy));
     on!(on_body_hover, |app, x, y| app.on_hover(x, y));
+    on!(on_body_pressed, |app, x, y| app.on_pressed(x, y));
+    on!(on_body_dragged, |app, x, y| app.on_dragged(x, y));
     on!(on_body_clicked, |app, x, y| app.on_clicked(x, y));
+    on!(on_copy_selection, |app| app.copy_selection());
     on!(on_toggle_remote, |app| app.load_remote_images());
     on!(on_open_link, |app| app.open_pending_link());
     on!(on_dismiss_link, |app| app.dismiss_link());

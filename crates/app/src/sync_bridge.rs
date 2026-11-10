@@ -150,11 +150,21 @@ pub fn spawn_store_writer(
                     }
                     on_event(&event);
                 }
-                // Surfaced as a status so the UI can show it; message content is never logged.
-                Err(e) => on_event(&SyncEvent::Status {
-                    account_id: account_of(&event),
-                    status: SyncStatus::Error(format!("store write failed: {e:#}")),
-                }),
+                Err(e) => {
+                    let error = format!("store write failed: {e:#}");
+                    on_event(&SyncEvent::Status {
+                        account_id: account_of(&event),
+                        status: SyncStatus::Error(error.clone()),
+                    });
+                    if let SyncEvent::BodyFetched { account_id, folder, uid, .. } = &event {
+                        on_event(&SyncEvent::ActionFailed {
+                            account_id: *account_id,
+                            folder: folder.clone(),
+                            uid: *uid,
+                            error,
+                        });
+                    }
+                }
             }
         }
     })

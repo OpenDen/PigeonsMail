@@ -234,7 +234,11 @@ pub async fn capabilities(session: &mut ImapSession) -> Result<Caps> {
 /// Downloads the full raw message without marking it as read.
 pub async fn fetch_body(session: &mut ImapSession, folder: &str, uid: u32) -> Result<Vec<u8>> {
     session.select(folder).await.with_context(|| format!("cannot select {folder}"))?;
+    fetch_selected_body(session, uid).await
+}
 
+/// Fetches a message from the currently selected folder.
+pub async fn fetch_selected_body(session: &mut ImapSession, uid: u32) -> Result<Vec<u8>> {
     let sizes: Vec<_> = session.uid_fetch(uid.to_string(), "(RFC822.SIZE)").await?.try_collect().await?;
     match sizes.iter().find_map(|f| f.size) {
         Some(sz) if sz > MAX_BODY_BYTES => {

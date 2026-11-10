@@ -1,6 +1,6 @@
-import { LineEdit, ListView } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ToolButton } from "widgets.slint";
+import { NeuCard, NeuField, ToolButton } from "widgets.slint";
 
 export struct ManageRule {
     id: int,
@@ -43,14 +43,12 @@ export component ManageDialog inherits Rectangle {
     callback delete-label();
     callback save-servers();
 
-    background: #00000060;
+    background: Theme.scrim;
     TouchArea { }
 
-    Rectangle {
+    NeuCard {
         width: 800px;
         height: 620px;
-        border-radius: 14px;
-        background: Theme.surface;
 
         VerticalLayout {
             padding: 18px;
@@ -78,7 +76,7 @@ export component ManageDialog inherits Rectangle {
                     for rule in root.rules: Rectangle {
                         height: 32px;
                         border-radius: 6px;
-                        background: root.rule-id == rule.id ? Theme.accent-soft : Theme.background;
+                        background: root.rule-id == rule.id ? Theme.well : transparent;
                         Text {
                             text: (rule.enabled ? "●  " : "○  ") + rule.name;
                             color: Theme.text;
@@ -90,7 +88,7 @@ export component ManageDialog inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    LineEdit { text <=> root.rule-name; placeholder-text: "Rule name"; }
+                    NeuField { text <=> root.rule-name; placeholder-text: "Rule name"; }
                     ToolButton {
                         text: root.rule-enabled ? "Enabled" : "Disabled";
                         active: root.rule-enabled;
@@ -102,11 +100,11 @@ export component ManageDialog inherits Rectangle {
                         clicked => { root.rule-match-all = !root.rule-match-all; }
                     }
                 }
-                LineEdit {
+                NeuField {
                     text <=> root.rule-condition;
                     placeholder-text: "Conditions: from:alice, subject:invoice, to:me, attachment";
                 }
-                LineEdit {
+                NeuField {
                     text <=> root.rule-actions;
                     placeholder-text: "Actions: star, mark-read, archive, delete, label:Work, move:Archive";
                 }
@@ -134,12 +132,12 @@ export component ManageDialog inherits Rectangle {
                     for label in root.labels: Rectangle {
                         height: 34px;
                         border-radius: 6px;
-                        background: root.label-id == label.id ? Theme.accent-soft : Theme.background;
+                        background: root.label-id == label.id ? Theme.well : transparent;
                         Text { text: label.name; color: Theme.text; vertical-alignment: center; x: 8px; }
                         TouchArea { clicked => { root.select-label(label.id); } }
                     }
                 }
-                LineEdit { text <=> root.label-name; placeholder-text: "Label name"; }
+                NeuField { text <=> root.label-name; placeholder-text: "Label name"; }
                 HorizontalLayout {
                     spacing: 8px;
                     ToolButton { text: "Create"; clicked => { root.create-label(); } }
@@ -153,9 +151,9 @@ export component ManageDialog inherits Rectangle {
                 spacing: 10px;
                 Text { text: "Edit connection hosts for " + root.account-email + ". Restarting this account will reconnect with the saved settings."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
                 Text { text: "IMAP host[:port]"; color: Theme.text-dim; font-size: 12px; }
-                LineEdit { text <=> root.imap-host; placeholder-text: "imap.example.com or imap.example.com:993"; }
+                NeuField { text <=> root.imap-host; placeholder-text: "imap.example.com or imap.example.com:993"; }
                 Text { text: "SMTP host (STARTTLS on port 587)"; color: Theme.text-dim; font-size: 12px; }
-                LineEdit { text <=> root.smtp-host; placeholder-text: "smtp.example.com"; }
+                NeuField { text <=> root.smtp-host; placeholder-text: "smtp.example.com"; }
                 ToolButton { text: "Save and reconnect"; clicked => { root.save-servers(); } }
             }
 

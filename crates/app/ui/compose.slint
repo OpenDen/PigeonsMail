@@ -1,6 +1,6 @@
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ToolButton } from "widgets.slint";
+import { NeuField, ToolButton } from "widgets.slint";
 
 export struct ComposeAttachment {
     name: string,
@@ -56,9 +56,9 @@ export component ComposeDialog inherits Rectangle {
             ToolButton { text: "×"; clicked => { root.discard(); } }
         }
         Text { text: "From " + root.from-address; font-size: 12px; color: Theme.text-dim; }
-        LineEdit { text <=> root.to; placeholder-text: "To"; }
-        LineEdit { text <=> root.cc; placeholder-text: "Cc"; }
-        LineEdit { text <=> root.subject; placeholder-text: "Subject"; }
+        NeuField { text <=> root.to; placeholder-text: "To"; }
+        NeuField { text <=> root.cc; placeholder-text: "Cc"; }
+        NeuField { text <=> root.subject; placeholder-text: "Subject"; }
         HorizontalLayout {
             spacing: 4px;
             ToolButton { text: "B"; clicked => { root.format("bold", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
@@ -78,13 +78,9 @@ export component ComposeDialog inherits Rectangle {
                 }
             }
         }
-        HorizontalLayout {
-            spacing: 6px;
-            ToolButton { text: "Attach"; clicked => { root.add-attachment(); } }
-        }
         Rectangle {
             vertical-stretch: 1;
-            background: Theme.background;
+            background: Theme.well;
             border-radius: 8px;
             clip: true;
             ScrollView {
@@ -101,7 +97,7 @@ export component ComposeDialog inherits Rectangle {
                 }
             }
             if root.preview-mode: Rectangle {
-                background: white;
+                background: Theme.paper;
                 Image {
                     source: root.preview-image;
                     width: parent.width;
@@ -125,7 +121,8 @@ export component ComposeDialog inherits Rectangle {
         }
         HorizontalLayout {
             spacing: 8px;
-            ToolButton { text: "Send"; clicked => { root.send(); } }
+            ToolButton { text: "Send"; primary: true; clicked => { root.send(); } }
+            ToolButton { text: "Attach"; clicked => { root.add-attachment(); } }
             Rectangle { }
         }
     }

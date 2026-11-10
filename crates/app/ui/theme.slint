@@ -1,12 +1,21 @@
 // Neumorphic palette shared by every view. Light-only.
+// Background and surface share one base colour so raised and inset elements sit on the same plane.
 export global Theme {
-    out property <color> background: #e4e9f0;
-    out property <color> surface: #eef2f7;
-    out property <color> shadow-dark: #b8c0cc;
+    out property <color> background: #e0e5ec;
+    out property <color> surface: #e0e5ec;
+    out property <color> well: #d1d9e3;
+    out property <color> paper: #ffffff;
+    out property <color> shadow-light: #ffffff;
+    out property <color> shadow-dark: #a3b1c6;
+    out property <color> scrim: #2b334066;
     out property <color> text: #2b3340;
-    out property <color> text-dim: #6b7585;
+    out property <color> text-dim: #5a6372;
     out property <color> accent: #3b7ddd;
     out property <color> accent-soft: #d6e4fa;
+    out property <color> accent-text: #ffffff;
     out property <color> danger: #c0392b;
     out property <color> star: #e0a800;
+    out property <color> notice: #f3e6bf;
+    out property <length> radius-card: 14px;
+    out property <length> radius-control: 10px;
 }

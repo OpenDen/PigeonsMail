@@ -1,6 +1,6 @@
-import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ToolButton } from "widgets.slint";
+import { NeuCard, NeuChip, NeuField, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -28,30 +28,6 @@ export struct AttachmentChip {
     name: string,
     size: string,
     index: int,
-}
-
-component FilterChip inherits Rectangle {
-    in property <string> text;
-    in-out property <bool> active;
-    callback toggled;
-
-    height: 26px;
-    min-width: label.preferred-width + 20px;
-    border-radius: 13px;
-    background: active ? Theme.accent : Theme.background;
-    label := Text {
-        text: root.text;
-        font-size: 12px;
-        color: root.active ? white : Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    TouchArea {
-        clicked => {
-            root.active = !root.active;
-            root.toggled();
-        }
-    }
 }
 
 export component MainWindow inherits Window {
@@ -193,7 +169,7 @@ export component MainWindow inherits Window {
     in-out property <string> acc-smtp-host;
 
     init => {
-        // The custom neumorphic theme is light-only; keep std widgets (LineEdit) light as well.
+        // The custom neumorphic theme is light-only; keep the std ListView/ScrollView light as well.
         Palette.color-scheme = ColorScheme.light;
         keys.focus();
     }
@@ -216,7 +192,7 @@ export component MainWindow inherits Window {
             if (event.text == "c") { root.compose-new(); return accept; }
             if (event.text == "r") { root.reply-message(); return accept; }
             if (event.text == "f") { root.forward-message(); return accept; }
-            if (event.text == "/") { search.focus(); return accept; }
+            if (event.text == "/") { search.focus-input(); return accept; }
             reject
         }
 
@@ -226,10 +202,8 @@ export component MainWindow inherits Window {
                 padding: 10px;
 
                 // ---------------- Sidebar ----------------
-                Rectangle {
+                NeuCard {
                     width: 220px;
-                    background: Theme.surface;
-                    border-radius: 12px;
 
                     VerticalLayout {
                         padding: 10px;
@@ -246,7 +220,7 @@ export component MainWindow inherits Window {
                             for item in root.sidebar: Rectangle {
                                 height: item.kind == 1 ? 34px : 32px;
                                 border-radius: 8px;
-                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
+                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.well : transparent;
 
                                 HorizontalLayout {
                                     padding-left: (item.kind == 2 || item.kind == 3) ? 18px : 8px;
@@ -270,9 +244,9 @@ export component MainWindow inherits Window {
                                     if item.kind == 1: Rectangle {
                                         width: 56px;
                                         Text {
-                                            text: "Remove";
-                                            font-size: 11px;
-                                            color: Theme.danger;
+                                        text: "⋯";
+                                        font-size: 14px;
+                                        color: Theme.text-dim;
                                             horizontal-alignment: right;
                                             vertical-alignment: center;
                                         }
@@ -297,7 +271,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 6px;
                             ToolButton { text: "Refresh"; clicked => { root.refresh(); } }
-                            ToolButton { text: "Compose (c)"; clicked => { root.compose-new(); } }
+                            ToolButton { text: "Compose (c)"; primary: true; clicked => { root.compose-new(); } }
                             ToolButton { text: "Manage"; clicked => { root.manage-open(); } }
                             ToolButton {
                                 text: "Add Account";
@@ -309,16 +283,14 @@ export component MainWindow inherits Window {
                 }
 
                 // ---------------- Message list ----------------
-                Rectangle {
+                NeuCard {
                     width: 320px;
-                    background: Theme.surface;
-                    border-radius: 12px;
 
                     VerticalLayout {
                         padding: 10px;
                         spacing: 8px;
 
-                        search := LineEdit {
+                        search := NeuField {
                             placeholder-text: "Search mail ( / )";
                             text <=> root.search-text;
                             edited(t) => { root.search-changed(t); }
@@ -327,17 +299,17 @@ export component MainWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 6px;
-                            FilterChip {
+                            NeuChip {
                                 text: "Unread";
                                 active <=> root.filter-unread;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
-                            FilterChip {
+                            NeuChip {
                                 text: "Starred";
                                 active <=> root.filter-starred;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
-                            FilterChip {
+                            NeuChip {
                                 text: "Attachments";
                                 active <=> root.filter-attachments;
                                 toggled => { keys.focus(); root.filters-changed(); }
@@ -347,14 +319,30 @@ export component MainWindow inherits Window {
                         ListView {
                             for m in root.messages: Rectangle {
                                 height: 72px;
-                                border-radius: 8px;
-                                background: root.selected-message == m.id ? Theme.accent-soft : transparent;
+                                border-radius: 10px;
+                                background: root.selected-message == m.id ? Theme.well : transparent;
+
+                                if root.selected-message == m.id: Rectangle {
+                                    x: 0px;
+                                    y: 12px;
+                                    width: 3px;
+                                    height: parent.height - 24px;
+                                    border-radius: 2px;
+                                    background: Theme.accent;
+                                }
 
                                 VerticalLayout {
                                     padding: 8px;
                                     spacing: 2px;
                                     HorizontalLayout {
                                         spacing: 6px;
+                                        if m.unread: Rectangle {
+                                            width: 6px;
+                                            height: 6px;
+                                            y: 6px;
+                                            border-radius: 3px;
+                                            background: Theme.accent;
+                                        }
                                         Text {
                                             text: m.sender;
                                             font-size: 13px;
@@ -367,7 +355,7 @@ export component MainWindow inherits Window {
                                             height: 16px;
                                             y: 3px;
                                             border-radius: 8px;
-                                            background: Theme.background;
+                                            background: Theme.well;
                                             Text {
                                                 text: "att";
                                                 font-size: 10px;
@@ -415,10 +403,8 @@ export component MainWindow inherits Window {
                 }
 
                 // ---------------- Reading pane ----------------
-                Rectangle {
+                NeuCard {
                     horizontal-stretch: 1;
-                    background: Theme.surface;
-                    border-radius: 12px;
 
                     if !root.has-message: Text {
                         text: root.message-count == 0 ? "No messages" : "Select a message to read";
@@ -438,6 +424,7 @@ export component MainWindow inherits Window {
                             ToolButton { text: "Reply (r)"; clicked => { root.reply-message(); } }
                             ToolButton { text: "Reply all"; clicked => { root.reply-all-message(); } }
                             ToolButton { text: "Forward (f)"; clicked => { root.forward-message(); } }
+                            Rectangle { width: 12px; }
                             ToolButton { text: "Archive (e)"; clicked => { root.archive(); } }
                             ToolButton { text: "Delete (#)"; clicked => { root.delete-message(); } }
                             ToolButton {
@@ -485,7 +472,7 @@ export component MainWindow inherits Window {
                                 height: 28px;
                                 min-width: chip-label.preferred-width + 20px;
                                 border-radius: 14px;
-                                background: Theme.background;
+                                background: Theme.well;
                                 chip-label := Text {
                                     text: a.name + "  (" + a.size + ")";
                                     font-size: 12px;
@@ -514,7 +501,7 @@ export component MainWindow inherits Window {
                         }
                         Rectangle {
                             vertical-stretch: 1;
-                            background: white;
+                            background: Theme.paper;
                             border-radius: 8px;
                             clip: true;
 
@@ -530,7 +517,7 @@ export component MainWindow inherits Window {
 
                             if root.loading: Text {
                                 text: "Downloading message...";
-                                color: #6b7585;
+                                color: Theme.text-dim;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -549,7 +536,7 @@ export component MainWindow inherits Window {
                                 width: 4px;
                                 height: root.scroll-size * parent.height;
                                 border-radius: 2px;
-                                background: #00000040;
+                                background: Theme.shadow-dark;
                             }
 
                             TouchArea {
@@ -600,7 +587,7 @@ export component MainWindow inherits Window {
                             if root.remote-blocked > 0: Rectangle {
                                 y: parent.height - self.height;
                                 height: 40px;
-                                background: #fff4d6;
+                                background: Theme.notice;
                                 HorizontalLayout {
                                     padding-left: 10px;
                                     padding-right: 10px;
@@ -628,6 +615,7 @@ export component MainWindow inherits Window {
             // ---------------- Status bar ----------------
             Rectangle {
                 height: 26px;
+                background: Theme.well;
                 HorizontalLayout {
                     padding-left: 14px;
                     padding-right: 14px;
@@ -645,7 +633,7 @@ export component MainWindow inherits Window {
 
     // ---------------- Remove account confirmation ----------------
     if root.show-remove-account: Rectangle {
-        background: #00000060;
+        background: Theme.scrim;
         TouchArea { }
 
         Rectangle {
@@ -744,7 +732,7 @@ export component MainWindow inherits Window {
 
     // ---------------- Add account dialog ----------------
     if root.show-add-account: Rectangle {
-        background: #00000060;
+        background: Theme.scrim;
         TouchArea { }
 
         Rectangle {
@@ -752,6 +740,9 @@ export component MainWindow inherits Window {
             height: 540px;
             border-radius: 14px;
             background: Theme.surface;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.shadow-dark;
+            drop-shadow-offset-y: 8px;
 
             VerticalLayout {
                 padding: 20px;
@@ -765,10 +756,10 @@ export component MainWindow inherits Window {
                     wrap: word-wrap;
                 }
                 Text { text: "Email address"; font-size: 12px; color: Theme.text-dim; }
-                LineEdit {
+                NeuField {
                     text <=> root.acc-email;
                     placeholder-text: "you@example.com";
-                    edited => { root.email-edited(self.text); }
+                    edited(t) => { root.email-edited(t); }
                 }
                 HorizontalLayout {
                     spacing: 8px;
@@ -786,15 +777,15 @@ export component MainWindow inherits Window {
                     }
                 }
                 Text { text: "App password (for other providers)"; font-size: 12px; color: Theme.text-dim; }
-                LineEdit { text <=> root.acc-password; input-type: password; }
+                NeuField { text <=> root.acc-password; password: true; }
                 Text { text: "IMAP server (blank = guess from address)"; font-size: 12px; color: Theme.text-dim; }
                 HorizontalLayout {
                     spacing: 8px;
-                    LineEdit { text <=> root.acc-imap-host; placeholder-text: "auto from email address"; }
-                    LineEdit { text <=> root.acc-imap-port; width: 70px; }
+                    NeuField { text <=> root.acc-imap-host; placeholder-text: "auto from email address"; }
+                    NeuField { text <=> root.acc-imap-port; width: 70px; }
                 }
                 Text { text: "SMTP server (blank = guess from address)"; font-size: 12px; color: Theme.text-dim; }
-                LineEdit { text <=> root.acc-smtp-host; placeholder-text: "auto from email address"; }
+                NeuField { text <=> root.acc-smtp-host; placeholder-text: "auto from email address"; }
                 if root.add-account-error != "": Text {
                     text: root.add-account-error;
                     color: Theme.danger;

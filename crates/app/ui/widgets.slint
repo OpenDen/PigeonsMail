@@ -1,24 +1,54 @@
 import { Theme } from "theme.slint";
 
-// Raised neumorphic button with a pressed state.
+// Raised surface: base colour, dark shadow lower-right and a light edge top-left.
+export component NeuCard inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius-card;
+    border-width: 1px;
+    border-color: Theme.shadow-light;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-x: 4px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow-dark;
+}
+
+// Inset surface for selected rows and wells. Slint has no inset shadow, so a darker fill
+// with a shadow-coloured edge stands in for it.
+export component NeuWell inherits Rectangle {
+    background: Theme.well;
+    border-radius: Theme.radius-control;
+    border-width: 1px;
+    border-color: Theme.shadow-dark;
+}
+
+// Raised button. Pressed and active states sink into the well colour; primary uses the accent.
 export component ToolButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     in property <bool> active: false;
+    in property <bool> primary: false;
     callback clicked;
 
-    height: 32px;
+    property <bool> sunken: area.pressed || root.active;
+
+    height: 34px;
     min-width: label.preferred-width + 24px;
-    border-radius: 8px;
-    background: !enabled ? transparent : (area.pressed ? Theme.accent-soft : (active ? Theme.accent-soft : Theme.surface));
-    drop-shadow-blur: enabled && !area.pressed ? 4px : 0px;
-    drop-shadow-offset-x: 1px;
-    drop-shadow-offset-y: 1px;
+    border-radius: Theme.radius-control;
+    background: !root.enabled ? transparent
+        : root.primary ? (area.pressed ? Theme.accent.darker(10%) : Theme.accent)
+        : root.sunken ? Theme.well
+        : (area.has-hover ? Theme.surface.brighter(4%) : Theme.surface);
+    border-width: 1px;
+    border-color: root.sunken ? Theme.shadow-dark : Theme.shadow-light;
+    drop-shadow-blur: root.enabled && !root.sunken ? 8px : 0px;
+    drop-shadow-offset-x: 3px;
+    drop-shadow-offset-y: 3px;
     drop-shadow-color: Theme.shadow-dark;
 
     label := Text {
         text: root.text;
-        color: root.enabled ? Theme.text : Theme.text-dim.transparentize(0.4);
+        color: !root.enabled ? Theme.text-dim.transparentize(0.4)
+            : root.primary ? Theme.accent-text : Theme.text;
         font-size: 13px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -26,5 +56,81 @@ export component ToolButton inherits Rectangle {
     area := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }
+    }
+}
+
+// Toggle chip: raised when off, sunken with accent text when on.
+export component NeuChip inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> active;
+    callback toggled;
+
+    height: 28px;
+    min-width: label.preferred-width + 20px;
+    border-radius: 14px;
+    background: root.active ? Theme.well : Theme.surface;
+    border-width: 1px;
+    border-color: root.active ? Theme.shadow-dark : Theme.shadow-light;
+    drop-shadow-blur: root.active ? 0px : 6px;
+    drop-shadow-offset-x: 2px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow-dark;
+
+    label := Text {
+        text: root.text;
+        font-size: 12px;
+        font-weight: root.active ? 700 : 400;
+        color: root.active ? Theme.accent : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        clicked => {
+            root.active = !root.active;
+            root.toggled();
+        }
+    }
+}
+
+// Inset text field. Wraps TextInput so clipboard, selection and IME behaviour are kept.
+export component NeuField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <bool> password: false;
+    callback edited(string);
+    callback accepted();
+
+    public function focus-input() {
+        input.focus();
+    }
+
+    height: 34px;
+    background: Theme.well;
+    border-radius: Theme.radius-control;
+    border-width: 1.5px;
+    border-color: input.has-focus ? Theme.accent : Theme.shadow-dark;
+
+    input := TextInput {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        vertical-alignment: center;
+        text <=> root.text;
+        font-size: 13px;
+        color: Theme.text;
+        single-line: true;
+        input-type: root.password ? InputType.password : InputType.text;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(); }
+    }
+    if root.text == "" && !input.has-focus: Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.placeholder-text;
+        color: Theme.text-dim;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }

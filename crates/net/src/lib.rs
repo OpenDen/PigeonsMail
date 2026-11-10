@@ -3,7 +3,9 @@ pub mod events;
 pub mod imap;
 pub mod oauth;
 pub mod remote;
+pub mod smtp;
 pub mod worker;
 
-pub use events::{FetchedMessage, FolderInfo, SyncEvent, SyncStatus};
-pub use worker::{AccountCommand, AccountConfig, AccountHandle, MailAction};
+pub use events::{FetchedMessage, FolderInfo, MessageState, SyncEvent, SyncStatus};
+pub use smtp::SmtpSettings;
+pub use worker::{AccountCommand, AccountConfig, AccountHandle, MailAction, SendRequest};

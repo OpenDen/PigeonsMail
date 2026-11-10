@@ -2,7 +2,7 @@
 
 ## Current State and Scope
 
-- The Rust workspace exists and Steps 1A to 1C of `Implementation_Plan.md` are implemented (storage, auth, sync, rules, reading pane, archive/delete/star). Step 1D (compose, attachments save/open, rules UI) is not. Verify the actual files and dependency APIs before copying example code from the plan; several plan snippets were corrected (raw SQLCipher key syntax, `contentless_delete`, rule priority ordering).
+- Phase 1 milestones 1A to 1D are implemented; live-mailbox, interactive UI and performance checks remain (see `DEVPLAN.md`). Verify the actual files and dependency APIs before copying example code from the plan; several plan snippets were corrected (raw SQLCipher key syntax, `contentless_delete`, rule priority ordering).
 - On Windows, run `. .\scripts\dev-env.ps1` before `cargo` (Strawberry Perl is needed for the vendored OpenSSL). `vendor/litehtml-sys` carries local MSVC build patches; see its `PATCHES.txt`.
 - The intended product is PigeonMail, a desktop mail client. Phase 1 is the complete mail client; Calendar is Phase 2 and should not expand Phase 1 work unless explicitly requested.
 - The workspace has five crates: `core`, `store`, `net`, `render`, and `app`. Keep their dependency direction and responsibilities clear.
@@ -23,7 +23,7 @@
 
 ## Implementation and Verification
 
-- Follow the milestone order in `Implementation_Plan.md` where practical, but validate architectural and dependency assumptions against current crate documentation and compiler diagnostics.
+- Follow the milestone order in `DEVPLAN.md` where practical, but validate architectural and dependency assumptions against current crate documentation and compiler diagnostics.
 - Keep changes focused on the requested subsystem and preserve the crate boundaries above.
 - Add or update focused tests for behavior changes, especially rule matching, storage/query behavior, MIME handling, and account actions.
 - Run the narrowest relevant tests or checks first, then workspace checks when available. Do not claim performance or memory targets without measurement.

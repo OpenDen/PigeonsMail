@@ -17,6 +17,8 @@ slint.workspace = true
 open.workspace = true
 arboard = { version = "3.7", default-features = false }
 zeroize.workspace = true
+rfd = "0.15.4"
+pulldown-cmark = "0.13.6"
 
 [build-dependencies]
 slint-build.workspace = true

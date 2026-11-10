@@ -8,12 +8,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_imap::extensions::idle::IdleResponse;
 use futures::future::BoxFuture;
-use mailthin_core::{AccountId, Rule};
+use mailthin_core::{AccountId, OutgoingMail, Rule};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::events::{SyncEvent, SyncStatus};
 use crate::imap::{self, Caps, Credential, FolderSync, ImapFlag, ImapSession, ImapSettings};
+use crate::smtp::{self, SmtpSettings};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -35,6 +36,7 @@ pub fn static_credential(credential: Credential) -> CredentialProvider {
 pub struct AccountConfig {
     pub account_id: AccountId,
     pub settings: ImapSettings,
+    pub smtp: SmtpSettings,
     pub credentials: CredentialProvider,
     pub rules: Vec<Rule>,
     /// Cached `(uidvalidity, last_uid)` per folder name, from the store.
@@ -44,11 +46,26 @@ pub struct AccountConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MailAction {
-    FetchBody { folder: String, uid: u32 },
-    SetFlags { folder: String, uid: u32, add: Vec<ImapFlag>, remove: Vec<ImapFlag> },
-    Move { folder: String, to: String, uid: u32 },
+    FetchBody {
+        folder: String,
+        uid: u32,
+    },
+    SetFlags {
+        folder: String,
+        uid: u32,
+        add: Vec<ImapFlag>,
+        remove: Vec<ImapFlag>,
+    },
+    Move {
+        folder: String,
+        to: String,
+        uid: u32,
+    },
     /// Permanently delete (used for messages already in Trash or when no Trash folder exists).
-    Expunge { folder: String, uid: u32 },
+    Expunge {
+        folder: String,
+        uid: u32,
+    },
 }
 
 impl MailAction {
@@ -67,34 +84,65 @@ pub enum AccountCommand {
     SetRules(Vec<Rule>),
     SyncNow,
     /// Forget the cached sync position of a folder and re-fetch it (recovery after a failed action).
-    Resync { folder: String },
+    Resync {
+        folder: String,
+    },
     Action(MailAction),
     Shutdown,
+}
+
+/// An outgoing message for the account's send task.
+#[derive(Debug)]
+pub struct SendRequest {
+    pub mail: OutgoingMail,
+    /// Folder that receives a copy of the sent message (usually Sent), if the account has one.
+    pub sent_folder: Option<String>,
 }
 
 pub struct AccountHandle {
     commands: mpsc::Sender<AccountCommand>,
     body_commands: mpsc::Sender<(String, u32)>,
+    send_commands: mpsc::Sender<SendRequest>,
     task: JoinHandle<()>,
     body_task: JoinHandle<()>,
+    send_task: JoinHandle<()>,
 }
 
 impl AccountHandle {
     pub async fn send(&self, cmd: AccountCommand) -> Result<()> {
         match cmd {
-            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self.body_commands
-                .send((folder, uid)).await.map_err(|_| anyhow::anyhow!("message download worker has stopped")),
-            other => self.commands.send(other).await.map_err(|_| anyhow::anyhow!("account worker has stopped")),
+            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self
+                .body_commands
+                .send((folder, uid))
+                .await
+                .map_err(|_| anyhow::anyhow!("message download worker has stopped")),
+            other => self
+                .commands
+                .send(other)
+                .await
+                .map_err(|_| anyhow::anyhow!("account worker has stopped")),
         }
     }
 
     /// Non-blocking send for callers outside the async runtime (e.g. the UI thread).
     pub fn try_send(&self, cmd: AccountCommand) -> Result<()> {
         match cmd {
-            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self.body_commands
-                .try_send((folder, uid)).map_err(|e| anyhow::anyhow!("cannot queue message download: {e}")),
-            other => self.commands.try_send(other).map_err(|e| anyhow::anyhow!("cannot reach account worker: {e}")),
+            AccountCommand::Action(MailAction::FetchBody { folder, uid }) => self
+                .body_commands
+                .try_send((folder, uid))
+                .map_err(|e| anyhow::anyhow!("cannot queue message download: {e}")),
+            other => self
+                .commands
+                .try_send(other)
+                .map_err(|e| anyhow::anyhow!("cannot reach account worker: {e}")),
         }
+    }
+
+    /// Queues an outgoing message. Sending runs on its own task, so it never waits for sync.
+    pub fn try_send_mail(&self, request: SendRequest) -> Result<()> {
+        self.send_commands
+            .try_send(request)
+            .map_err(|e| anyhow::anyhow!("cannot queue message for sending: {e}"))
     }
 
     pub async fn shutdown(self) {
@@ -102,18 +150,30 @@ impl AccountHandle {
         let _ = self.commands.send(AccountCommand::Shutdown).await;
         let _ = self.task.await;
         let _ = self.body_task.await;
+        // Dropping the sender lets the send task finish any message already accepted.
+        drop(self.send_commands);
+        let _ = self.send_task.await;
     }
 }
 
 pub fn spawn_account(config: AccountConfig, events: mpsc::Sender<SyncEvent>) -> AccountHandle {
     let (tx, rx) = mpsc::channel(16);
     let (body_tx, body_rx) = mpsc::channel(16);
+    let (send_tx, send_rx) = mpsc::channel(8);
     let body_task = tokio::spawn(body_worker(
         config.account_id,
         config.settings.clone(),
         config.credentials.clone(),
         events.clone(),
         body_rx,
+    ));
+    let send_task = tokio::spawn(send_worker(
+        config.account_id,
+        config.settings.clone(),
+        config.smtp,
+        config.credentials.clone(),
+        events.clone(),
+        send_rx,
     ));
     let worker = Worker {
         account_id: config.account_id,
@@ -126,7 +186,72 @@ pub fn spawn_account(config: AccountConfig, events: mpsc::Sender<SyncEvent>) -> 
         commands: rx,
         backoff: BACKOFF_MIN,
     };
-    AccountHandle { commands: tx, body_commands: body_tx, task: tokio::spawn(worker.run()), body_task }
+    AccountHandle {
+        commands: tx,
+        body_commands: body_tx,
+        send_commands: send_tx,
+        task: tokio::spawn(worker.run()),
+        body_task,
+        send_task,
+    }
+}
+
+/// Sends queued messages one at a time. Each send opens its own SMTP connection and, when a Sent
+/// folder is known, a short IMAP connection to file the copy, so no session is kept idle.
+async fn send_worker(
+    account_id: AccountId,
+    settings: ImapSettings,
+    smtp_settings: SmtpSettings,
+    credentials: CredentialProvider,
+    events: mpsc::Sender<SyncEvent>,
+    mut requests: mpsc::Receiver<SendRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        let subject = request.mail.subject.clone();
+        let event = match deliver(&settings, &smtp_settings, &credentials, &request).await {
+            Ok(copy_error) => SyncEvent::Sent {
+                account_id,
+                subject,
+                copy_error,
+            },
+            Err(e) => SyncEvent::SendFailed {
+                account_id,
+                subject,
+                error: format!("{e:#}"),
+            },
+        };
+        if events.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Returns `Ok(copy_error)`: the message was sent, and `copy_error` says whether the Sent copy failed.
+async fn deliver(
+    settings: &ImapSettings,
+    smtp_settings: &SmtpSettings,
+    credentials: &CredentialProvider,
+    request: &SendRequest,
+) -> Result<Option<String>> {
+    let credential = credentials().await.context("cannot obtain credentials")?;
+    let raw = smtp::send(
+        smtp_settings,
+        &credential,
+        &smtp_settings.username,
+        &request.mail,
+    )
+    .await?;
+    let Some(folder) = &request.sent_folder else {
+        return Ok(None);
+    };
+    let copy: Result<()> = async {
+        let mut session = imap::connect(settings, &credential).await?;
+        imap::append_message(&mut session, folder, &raw).await?;
+        let _ = session.logout().await;
+        Ok(())
+    }
+    .await;
+    Ok(copy.err().map(|e| format!("{e:#}")))
 }
 
 /// A separate, lazily connected IMAP session keeps interactive downloads independent of sync.
@@ -160,13 +285,22 @@ async fn body_worker(
             }
             let current = session.as_mut().expect("connected above");
             if selected.as_deref() != Some(folder.as_str()) {
-                current.select(&folder).await.with_context(|| format!("cannot select {folder}"))?;
+                current
+                    .select(&folder)
+                    .await
+                    .with_context(|| format!("cannot select {folder}"))?;
                 selected = Some(folder.clone());
             }
             imap::fetch_selected_body(current, uid).await
-        }).await;
+        })
+        .await;
         let event = match result {
-            Ok(Ok(raw)) => SyncEvent::BodyFetched { account_id, folder, uid, raw },
+            Ok(Ok(raw)) => SyncEvent::BodyFetched {
+                account_id,
+                folder,
+                uid,
+                raw,
+            },
             failure => {
                 session = None;
                 selected = None;
@@ -175,7 +309,12 @@ async fn body_worker(
                     Err(_) => "message download timed out".to_string(),
                     Ok(Ok(_)) => unreachable!(),
                 };
-                SyncEvent::ActionFailed { account_id, folder, uid, error }
+                SyncEvent::ActionFailed {
+                    account_id,
+                    folder,
+                    uid,
+                    error,
+                }
             }
         };
         if events.send(event).await.is_err() {
@@ -192,27 +331,49 @@ mod body_worker_tests {
     async fn body_requests_bypass_the_sync_queue() {
         let (commands, mut command_rx) = mpsc::channel(1);
         let (body_commands, mut body_rx) = mpsc::channel(1);
+        let (send_commands, _send_rx) = mpsc::channel(1);
         let task = tokio::spawn(async {});
         let body_task = tokio::spawn(async {});
-        let handle = AccountHandle { commands, body_commands, task, body_task };
+        let send_task = tokio::spawn(async {});
+        let handle = AccountHandle {
+            commands,
+            body_commands,
+            send_commands,
+            task,
+            body_task,
+            send_task,
+        };
         handle.try_send(AccountCommand::SyncNow).unwrap();
-        handle.try_send(AccountCommand::Action(MailAction::FetchBody { folder: "INBOX".into(), uid: 42 })).unwrap();
-        assert!(matches!(command_rx.recv().await, Some(AccountCommand::SyncNow)));
+        handle
+            .try_send(AccountCommand::Action(MailAction::FetchBody {
+                folder: "INBOX".into(),
+                uid: 42,
+            }))
+            .unwrap();
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(AccountCommand::SyncNow)
+        ));
         assert_eq!(body_rx.recv().await, Some(("INBOX".into(), 42)));
     }
 
     #[tokio::test]
     async fn body_worker_reports_credential_failure() {
-        let credentials: CredentialProvider = Arc::new(|| Box::pin(async {
-            Err(anyhow::anyhow!("credentials unavailable"))
-        }));
-        let settings = ImapSettings { host: "invalid".into(), port: 993, username: "test".into() };
+        let credentials: CredentialProvider =
+            Arc::new(|| Box::pin(async { Err(anyhow::anyhow!("credentials unavailable")) }));
+        let settings = ImapSettings {
+            host: "invalid".into(),
+            port: 993,
+            username: "test".into(),
+        };
         let (events, mut event_rx) = mpsc::channel(1);
         let (commands, rx) = mpsc::channel(1);
         let worker = tokio::spawn(body_worker(1, settings, credentials, events, rx));
         commands.send(("INBOX".into(), 7)).await.unwrap();
         match event_rx.recv().await.unwrap() {
-            SyncEvent::ActionFailed { folder, uid, error, .. } => {
+            SyncEvent::ActionFailed {
+                folder, uid, error, ..
+            } => {
                 assert_eq!((folder.as_str(), uid), ("INBOX", 7));
                 assert!(error.contains("credentials unavailable"));
             }
@@ -258,7 +419,10 @@ struct Worker {
 }
 
 fn now_ts() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl Worker {
@@ -267,7 +431,11 @@ impl Worker {
     }
 
     async fn status(&self, status: SyncStatus) -> Result<()> {
-        self.emit(SyncEvent::Status { account_id: self.account_id, status }).await
+        self.emit(SyncEvent::Status {
+            account_id: self.account_id,
+            status,
+        })
+        .await
     }
 
     async fn run(mut self) {
@@ -277,7 +445,11 @@ impl Worker {
                 Ok(()) => return,
                 Err(e) if e.downcast_ref::<ChannelClosed>().is_some() => return,
                 Err(e) => {
-                    if self.status(SyncStatus::Error(format!("{e:#}"))).await.is_err() {
+                    if self
+                        .status(SyncStatus::Error(format!("{e:#}")))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     if !self.wait_before_retry().await {
@@ -323,7 +495,9 @@ impl Worker {
 
     /// Runs one connection until it fails (`Err`) or the worker is told to stop (`Ok`).
     async fn session(&mut self) -> Result<()> {
-        let credential = (self.credentials)().await.context("cannot obtain credentials")?;
+        let credential = (self.credentials)()
+            .await
+            .context("cannot obtain credentials")?;
         let mut session = imap::connect(&self.settings, &credential).await?;
         drop(credential);
         self.backoff = BACKOFF_MIN;
@@ -362,26 +536,48 @@ impl Worker {
         }
     }
 
-    async fn run_action(&mut self, session: &mut ImapSession, caps: Caps, action: MailAction) -> Result<()> {
+    async fn run_action(
+        &mut self,
+        session: &mut ImapSession,
+        caps: Caps,
+        action: MailAction,
+    ) -> Result<()> {
         let (folder, uid) = {
             let (f, u) = action.target();
             (f.to_string(), u)
         };
         let result: Result<Option<Vec<u8>>> = match &action {
-            MailAction::FetchBody { folder, uid } => imap::fetch_body(session, folder, *uid).await.map(Some),
-            MailAction::SetFlags { folder, uid, add, remove } => {
-                imap::set_flags(session, folder, *uid, add, remove).await.map(|()| None)
+            MailAction::FetchBody { folder, uid } => {
+                imap::fetch_body(session, folder, *uid).await.map(Some)
             }
+            MailAction::SetFlags {
+                folder,
+                uid,
+                add,
+                remove,
+            } => imap::set_flags(session, folder, *uid, add, remove)
+                .await
+                .map(|()| None),
             MailAction::Move { folder, to, uid } => {
-                imap::move_message(session, folder, to, *uid, caps).await.map(|()| None)
+                imap::move_message(session, folder, to, *uid, caps)
+                    .await
+                    .map(|()| None)
             }
             MailAction::Expunge { folder, uid } => {
-                imap::expunge_message(session, folder, *uid, caps).await.map(|()| None)
+                imap::expunge_message(session, folder, *uid, caps)
+                    .await
+                    .map(|()| None)
             }
         };
         match result {
             Ok(Some(raw)) => {
-                self.emit(SyncEvent::BodyFetched { account_id: self.account_id, folder, uid, raw }).await
+                self.emit(SyncEvent::BodyFetched {
+                    account_id: self.account_id,
+                    folder,
+                    uid,
+                    raw,
+                })
+                .await
             }
             Ok(None) => Ok(()),
             Err(e) => {
@@ -399,7 +595,11 @@ impl Worker {
     async fn sync_all(&mut self, session: &mut ImapSession) -> Result<()> {
         let folders = imap::list_folders(session).await?;
         let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
-        self.emit(SyncEvent::Folders { account_id: self.account_id, folders }).await?;
+        self.emit(SyncEvent::Folders {
+            account_id: self.account_id,
+            folders,
+        })
+        .await?;
         for name in names {
             self.sync_one(session, &name).await?;
         }
@@ -409,20 +609,38 @@ impl Worker {
     async fn sync_one(&mut self, session: &mut ImapSession, folder: &str) -> Result<()> {
         let known = self.states.get(folder).copied();
         let now = now_ts();
-        let result = imap::sync_folder(session, folder, known, now - self.window_secs, now, &self.rules).await;
-        let FolderSync { uidvalidity, reset, messages } = match result {
+        let result = imap::sync_folder(
+            session,
+            folder,
+            known,
+            now - self.window_secs,
+            now,
+            &self.rules,
+        )
+        .await;
+        let FolderSync {
+            uidvalidity,
+            reset,
+            messages,
+        } = match result {
             Ok(r) => r,
             // A folder-level failure (e.g. no permission) must not stop the other folders.
             Err(e) => {
-                self.status(SyncStatus::Error(format!("{folder}: {e:#}"))).await?;
+                self.status(SyncStatus::Error(format!("{folder}: {e:#}")))
+                    .await?;
                 return Ok(());
             }
         };
 
-        let base = if reset { 0 } else { known.map_or(0, |(_, last)| last) };
+        let base = if reset {
+            0
+        } else {
+            known.map_or(0, |(_, last)| last)
+        };
         let last_uid = messages.iter().map(|m| m.uid).max().unwrap_or(0).max(base);
         let changed = known != Some((uidvalidity, last_uid));
-        self.states.insert(folder.to_string(), (uidvalidity, last_uid));
+        self.states
+            .insert(folder.to_string(), (uidvalidity, last_uid));
 
         if changed || reset || !messages.is_empty() {
             self.emit(SyncEvent::Messages {
@@ -434,6 +652,13 @@ impl Worker {
             })
             .await?;
         }
+        let states = imap::folder_state(session, folder).await?;
+        self.emit(SyncEvent::FolderState {
+            account_id: self.account_id,
+            folder: folder.to_string(),
+            states,
+        })
+        .await?;
         Ok(())
     }
 
@@ -469,7 +694,10 @@ impl Worker {
     }
 
     async fn idle(&mut self, mut session: ImapSession) -> Result<(ImapSession, Wake)> {
-        session.select("INBOX").await.context("cannot select INBOX for IDLE")?;
+        session
+            .select("INBOX")
+            .await
+            .context("cannot select INBOX for IDLE")?;
         let mut handle = session.idle();
         handle.init().await?;
 

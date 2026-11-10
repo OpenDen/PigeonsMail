@@ -24,7 +24,7 @@ pub struct OAuthProvider {
     pub loopback_host: &'static str,
     pub imap_host: &'static str,
     pub smtp_host: &'static str,
-    /// Environment variable holding the registered client ID (see DEVELOPMENT.md).
+    /// Environment variable holding the registered client ID (see README.md).
     pub client_id_env: &'static str,
     /// Public client ID built into the app. The environment variable overrides it.
     pub default_client_id: Option<&'static str>,

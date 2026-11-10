@@ -3,10 +3,11 @@ pub mod keystore;
 pub mod queries;
 
 pub use queries::{
-    fts_query_from_user, AccountRow, FolderRow, ListScope, MessageLocation, MessageQuery, MessageRow,
+    fts_query_from_user, AccountRow, FolderRow, LabelRow, ListScope, MessageLocation, MessageQuery,
+    MessageRow,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use mailthin_core::{AccountId, LabelId, MessageId, Rule};
@@ -146,8 +147,10 @@ impl MailStore {
         // The key must be applied before any other statement. Raw-key syntax skips the KDF.
         let pragma = Zeroizing::new(format!("PRAGMA key = \"x'{}'\";", raw_key_hex.as_str()));
         conn.execute_batch(&pragma)?;
-        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-            .context("Cannot read database: wrong key or not a SQLCipher database")?;
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .context("Cannot read database: wrong key or not a SQLCipher database")?;
 
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -172,13 +175,68 @@ impl MailStore {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Folders, messages and bodies of the account are removed by `ON DELETE CASCADE`.
-    pub fn delete_account(&self, id: AccountId) -> Result<()> {
-        self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+    pub fn update_rule(&self, id: i64, account_id: Option<AccountId>, rule: &Rule) -> Result<()> {
+        let json = serde_json::to_string(rule)?;
+        self.conn.execute(
+            "UPDATE rules SET account_id = ?2, enabled = ?3, priority = ?4, rule_json = ?5 WHERE id = ?1",
+            params![id, account_id, rule.enabled, rule.priority, json],
+        )?;
         Ok(())
     }
 
-    pub fn upsert_folder(&self, account_id: AccountId, name: &str, role: Option<&str>) -> Result<i64> {
+    pub fn delete_rule(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM rules WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Loads enabled and disabled rules for editing, limited to those applicable to the account.
+    pub fn load_all_rules(&self, account_id: AccountId) -> Result<Vec<Rule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, rule_json FROM rules
+             WHERE account_id IS NULL OR account_id = ?1
+             ORDER BY priority, id",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, json)| {
+                let mut rule: Rule = serde_json::from_str(&json)?;
+                rule.id = id;
+                Ok(rule)
+            })
+            .collect()
+    }
+
+    /// Folders, messages and bodies of the account are removed by `ON DELETE CASCADE`.
+    pub fn delete_account(&self, id: AccountId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn update_account_servers(
+        &self,
+        id: AccountId,
+        imap_host: &str,
+        smtp_host: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE accounts SET imap_host = ?2, smtp_host = ?3 WHERE id = ?1",
+            params![id, imap_host, smtp_host],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_folder(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        role: Option<&str>,
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO folders (account_id, name, role) VALUES (?1, ?2, ?3)
              ON CONFLICT(account_id, name) DO UPDATE SET role = COALESCE(excluded.role, folders.role)",
@@ -234,7 +292,13 @@ impl MailStore {
     }
 
     /// Caches a raw RFC 822 body and adds its text to the search index.
-    pub fn put_body(&mut self, message_id: MessageId, raw: &[u8], body_text: &str, now_ts: i64) -> Result<()> {
+    pub fn put_body(
+        &mut self,
+        message_id: MessageId,
+        raw: &[u8],
+        body_text: &str,
+        now_ts: i64,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO bodies (message_id, raw_blob, last_accessed) VALUES (?1, ?2, ?3)
@@ -242,7 +306,10 @@ impl MailStore {
                 last_accessed = excluded.last_accessed",
             params![message_id, raw, now_ts],
         )?;
-        tx.execute("UPDATE messages SET body_state = 1 WHERE id = ?1", params![message_id])?;
+        tx.execute(
+            "UPDATE messages SET body_state = 1 WHERE id = ?1",
+            params![message_id],
+        )?;
         let (subject, sender): (String, String) = tx.query_row(
             "SELECT subject, sender FROM messages WHERE id = ?1",
             params![message_id],
@@ -257,10 +324,100 @@ impl MailStore {
         Ok(())
     }
 
+    pub fn remove_message_label(&self, message_id: MessageId, label_id: LabelId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM message_labels WHERE message_id = ?1 AND label_id = ?2",
+            params![message_id, label_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn toggle_message_label(&self, message_id: MessageId, label_id: LabelId) -> Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM message_labels WHERE message_id = ?1 AND label_id = ?2",
+            params![message_id, label_id],
+        )?;
+        if changed != 0 {
+            return Ok(false);
+        }
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO message_labels (message_id, label_id)
+             SELECT ?1, id FROM labels WHERE id = ?2",
+            params![message_id, label_id],
+        )?;
+        if inserted == 0 {
+            bail!("The selected label no longer exists");
+        }
+        Ok(true)
+    }
+
+    pub fn message_labels(&self, message_id: MessageId) -> Result<Vec<LabelRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.name, l.color FROM labels l
+             JOIN message_labels ml ON ml.label_id = l.id
+             WHERE ml.message_id = ?1 ORDER BY l.name COLLATE NOCASE",
+        )?;
+        let labels = stmt
+            .query_map(params![message_id], |r| {
+                Ok(LabelRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    color: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(labels)
+    }
+
+    pub fn list_labels(&self) -> Result<Vec<LabelRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, color FROM labels ORDER BY name COLLATE NOCASE")?;
+        let labels = stmt
+            .query_map([], |r| {
+                Ok(LabelRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    color: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(labels)
+    }
+
+    pub fn create_label(&self, name: &str, color: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO labels (name, color) VALUES (?1, ?2)",
+            params![name, color],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn rename_label(&self, label_id: i64, name: &str) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE labels SET name = ?2 WHERE id = ?1",
+            params![label_id, name],
+        )?;
+        if updated == 0 {
+            bail!("The selected label no longer exists");
+        }
+        Ok(())
+    }
+
+    pub fn delete_label(&self, label_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM labels WHERE id = ?1", params![label_id])?;
+        Ok(())
+    }
+
     pub fn get_body(&self, message_id: MessageId, now_ts: i64) -> Result<Option<Vec<u8>>> {
         let blob: Option<Vec<u8>> = self
             .conn
-            .query_row("SELECT raw_blob FROM bodies WHERE message_id = ?1", params![message_id], |r| r.get(0))
+            .query_row(
+                "SELECT raw_blob FROM bodies WHERE message_id = ?1",
+                params![message_id],
+                |r| r.get(0),
+            )
             .optional()?;
         if blob.is_some() {
             self.conn.execute(
@@ -290,7 +447,11 @@ impl MailStore {
     }
 
     /// Cached `(id, uidvalidity, last_uid)` for a folder, if known.
-    pub fn folder_sync_state(&self, account_id: AccountId, name: &str) -> Result<Option<(i64, u32, u32)>> {
+    pub fn folder_sync_state(
+        &self,
+        account_id: AccountId,
+        name: &str,
+    ) -> Result<Option<(i64, u32, u32)>> {
         Ok(self
             .conn
             .query_row(
@@ -308,12 +469,19 @@ impl MailStore {
             "SELECT name, uidvalidity, last_uid FROM folders WHERE account_id = ?1 AND uidvalidity != 0",
         )?;
         let rows = stmt
-            .query_map(params![account_id], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?))))?
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+            })?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
         Ok(rows)
     }
 
-    pub fn set_folder_sync_state(&self, folder_id: i64, uidvalidity: u32, last_uid: u32) -> Result<()> {
+    pub fn set_folder_sync_state(
+        &self,
+        folder_id: i64,
+        uidvalidity: u32,
+        last_uid: u32,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE folders SET uidvalidity = ?2, last_uid = ?3 WHERE id = ?1",
             params![folder_id, uidvalidity, last_uid],
@@ -328,7 +496,10 @@ impl MailStore {
             "DELETE FROM fts WHERE rowid IN (SELECT id FROM messages WHERE folder_id = ?1)",
             params![folder_id],
         )?;
-        tx.execute("DELETE FROM messages WHERE folder_id = ?1", params![folder_id])?;
+        tx.execute(
+            "DELETE FROM messages WHERE folder_id = ?1",
+            params![folder_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -344,7 +515,11 @@ impl MailStore {
     }
 
     pub fn message_count(&self, folder_id: i64) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT count(*) FROM messages WHERE folder_id = ?1", params![folder_id], |r| r.get(0))?)
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM messages WHERE folder_id = ?1",
+            params![folder_id],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn save_rule(&self, account_id: Option<AccountId>, rule: &Rule) -> Result<i64> {
@@ -364,7 +539,9 @@ impl MailStore {
              ORDER BY priority, id",
         )?;
         let rows = stmt
-            .query_map(params![account_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(params![account_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(|(id, json)| {
@@ -373,6 +550,52 @@ impl MailStore {
                 Ok(rule)
             })
             .collect()
+    }
+
+    /// Updates cached flags and removes messages that no longer exist in the server folder.
+    /// The caller supplies one folder's current UID/flag snapshot.
+    pub fn reconcile_folder_state(
+        &mut self,
+        account_id: AccountId,
+        folder: &str,
+        states: &[(u32, u32)],
+    ) -> Result<()> {
+        let Some(folder_id) = self
+            .conn
+            .query_row(
+                "SELECT id FROM folders WHERE account_id = ?1 AND name = ?2",
+                params![account_id, folder],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        let remote_uids: HashSet<u32> = states.iter().map(|(uid, _)| *uid).collect();
+        let tx = self.conn.transaction()?;
+        for (uid, flags) in states {
+            tx.execute(
+                "UPDATE messages SET flags = (?3 | (flags & ?4)) WHERE folder_id = ?1 AND uid = ?2",
+                params![folder_id, uid, flags, mailthin_core::flags::HAS_ATTACHMENT],
+            )?;
+        }
+        let local = {
+            let mut stmt = tx.prepare("SELECT id, uid FROM messages WHERE folder_id = ?1")?;
+            let rows = stmt
+                .query_map(params![folder_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (id, uid) in local {
+            if !remote_uids.contains(&uid) {
+                tx.execute("DELETE FROM fts WHERE rowid = ?1", params![id])?;
+                tx.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -462,7 +685,9 @@ mod tests {
         assert_eq!(store.search("invoice", 10).unwrap(), vec![id]);
         assert!(store.search("zebra", 10).unwrap().is_empty());
 
-        store.put_body(id, b"raw", "the zebra crossing", 200).unwrap();
+        store
+            .put_body(id, b"raw", "the zebra crossing", 200)
+            .unwrap();
         assert_eq!(store.search("zebra", 10).unwrap(), vec![id]);
     }
 
@@ -497,7 +722,12 @@ mod tests {
         };
         store.save_rule(None, &mk(5, "late")).unwrap();
         store.save_rule(None, &mk(1, "early")).unwrap();
-        let names: Vec<_> = store.load_rules(1).unwrap().into_iter().map(|r| r.name).collect();
+        let names: Vec<_> = store
+            .load_rules(1)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
         assert_eq!(names, ["early", "late"]);
     }
 }

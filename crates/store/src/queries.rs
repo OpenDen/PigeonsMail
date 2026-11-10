@@ -1,6 +1,6 @@
 //! Read/update queries used by the UI: message lists, folder tree, filters and search.
 use anyhow::Result;
-use mailthin_core::{flags, AccountId, MessageId};
+use mailthin_core::{flags, AccountId, LabelId, MessageId};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
@@ -11,6 +11,8 @@ pub enum ListScope {
     /// Inbox folders of every account.
     UnifiedInbox,
     Folder(i64),
+    Label(LabelId),
+    Account(AccountId),
 }
 
 #[derive(Debug, Clone)]
@@ -25,7 +27,13 @@ pub struct MessageQuery {
 
 impl MessageQuery {
     pub fn new(scope: ListScope) -> Self {
-        Self { scope, unread_only: false, starred_only: false, attachments_only: false, search: None }
+        Self {
+            scope,
+            unread_only: false,
+            starred_only: false,
+            attachments_only: false,
+            search: None,
+        }
     }
 }
 
@@ -87,12 +95,23 @@ pub struct FolderRow {
     pub unread: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelRow {
+    pub id: LabelId,
+    pub name: String,
+    pub color: String,
+}
+
 /// Turns free text into a safe FTS5 expression: each word becomes a quoted prefix term, so user
 /// input can never inject FTS operators or cause a syntax error.
 pub fn fts_query_from_user(input: &str) -> Option<String> {
     let terms: Vec<String> = input
         .split_whitespace()
-        .map(|w| w.chars().filter(|c| c.is_alphanumeric() || matches!(c, '@' | '.' | '_' | '-')).collect::<String>())
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, '@' | '.' | '_' | '-'))
+                .collect::<String>()
+        })
         .filter(|w| !w.is_empty())
         .map(|w| format!("\"{w}\"*"))
         .collect();
@@ -111,6 +130,15 @@ fn build(q: &MessageQuery) -> (String, Vec<Value>) {
         ListScope::UnifiedInbox => conds.push("f.role = 'inbox'".into()),
         ListScope::Folder(id) => {
             conds.push("m.folder_id = ?".into());
+            args.push(Value::Integer(*id));
+        }
+        ListScope::Label(id) => {
+            from.push_str(" JOIN message_labels ml ON ml.message_id = m.id");
+            conds.push("ml.label_id = ?".into());
+            args.push(Value::Integer(*id));
+        }
+        ListScope::Account(id) => {
+            conds.push("m.account_id = ?".into());
             args.push(Value::Integer(*id));
         }
     }
@@ -149,26 +177,43 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
 
 impl MailStore {
     /// One page of the message list, newest first.
-    pub fn query_messages(&self, q: &MessageQuery, offset: usize, limit: usize) -> Result<Vec<MessageRow>> {
+    pub fn query_messages(
+        &self,
+        q: &MessageQuery,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
         let (clause, mut args) = build(q);
         args.push(Value::Integer(limit as i64));
         args.push(Value::Integer(offset as i64));
-        let sql = format!("SELECT {SELECT_COLS} {clause} ORDER BY m.date_ts DESC, m.id DESC LIMIT ? OFFSET ?");
+        let sql = format!(
+            "SELECT {SELECT_COLS} {clause} ORDER BY m.date_ts DESC, m.id DESC LIMIT ? OFFSET ?"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args), row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map(params_from_iter(args), row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
     pub fn count_messages(&self, q: &MessageQuery) -> Result<usize> {
         let (clause, args) = build(q);
-        let n: i64 = self.conn.query_row(&format!("SELECT count(*) {clause}"), params_from_iter(args), |r| r.get(0))?;
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT count(*) {clause}"),
+            params_from_iter(args),
+            |r| r.get(0),
+        )?;
         Ok(n as usize)
     }
 
     pub fn get_message(&self, id: MessageId) -> Result<Option<MessageRow>> {
         Ok(self
             .conn
-            .query_row(&format!("SELECT {SELECT_COLS} FROM messages m WHERE m.id = ?1"), params![id], row)
+            .query_row(
+                &format!("SELECT {SELECT_COLS} FROM messages m WHERE m.id = ?1"),
+                params![id],
+                row,
+            )
             .optional()?)
     }
 
@@ -195,7 +240,12 @@ impl MailStore {
     }
 
     /// Finds a message by its server identity (used to apply server-side results).
-    pub fn find_message(&self, account_id: AccountId, folder: &str, uid: u32) -> Result<Option<MessageId>> {
+    pub fn find_message(
+        &self,
+        account_id: AccountId,
+        folder: &str,
+        uid: u32,
+    ) -> Result<Option<MessageId>> {
         Ok(self
             .conn
             .query_row(
@@ -213,7 +263,14 @@ impl MailStore {
             "UPDATE messages SET flags = (flags | ?2) & ~?3 WHERE id = ?1",
             params![id, set, clear],
         )?;
-        Ok(self.conn.query_row("SELECT flags FROM messages WHERE id = ?1", params![id], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT flags FROM messages WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Removes a message and its cached body and index entry from the local cache.
@@ -226,8 +283,17 @@ impl MailStore {
     }
 
     /// Updates stored attachment flag/snippet once the full message has been parsed.
-    pub fn set_message_preview(&self, id: MessageId, snippet: &str, has_attachment: bool) -> Result<()> {
-        let bit = if has_attachment { flags::HAS_ATTACHMENT } else { 0 };
+    pub fn set_message_preview(
+        &self,
+        id: MessageId,
+        snippet: &str,
+        has_attachment: bool,
+    ) -> Result<()> {
+        let bit = if has_attachment {
+            flags::HAS_ATTACHMENT
+        } else {
+            0
+        };
         self.conn.execute(
             "UPDATE messages SET snippet = ?2, flags = (flags & ~?4) | ?3 WHERE id = ?1",
             params![id, snippet, bit, flags::HAS_ATTACHMENT],
@@ -274,9 +340,9 @@ impl MailStore {
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, kind, email, imap_host, smtp_host, auth_type FROM accounts ORDER BY id")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, email, imap_host, smtp_host, auth_type FROM accounts ORDER BY id",
+        )?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(AccountRow {
@@ -296,12 +362,20 @@ impl MailStore {
     pub fn folder_name(&self, folder_id: i64) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT name FROM folders WHERE id = ?1", params![folder_id], |r| r.get(0))
+            .query_row(
+                "SELECT name FROM folders WHERE id = ?1",
+                params![folder_id],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
     /// `(id, name)` of the account's folder with the given role.
-    pub fn folder_by_role(&self, account_id: AccountId, role: &str) -> Result<Option<(i64, String)>> {
+    pub fn folder_by_role(
+        &self,
+        account_id: AccountId,
+        role: &str,
+    ) -> Result<Option<(i64, String)>> {
         Ok(self
             .conn
             .query_row(
@@ -317,12 +391,14 @@ impl MailStore {
 mod tests {
     use super::*;
     use crate::{NewAccount, NewMessage};
+    use mailthin_core::{Condition, Rule, RuleAction};
     use zeroize::Zeroizing;
 
     fn open() -> (tempfile::TempDir, MailStore) {
         let dir = tempfile::tempdir().unwrap();
         let key = Zeroizing::new("cd".repeat(32));
-        let store = MailStore::open_encrypted(dir.path().join("q.db").to_str().unwrap(), &key).unwrap();
+        let store =
+            MailStore::open_encrypted(dir.path().join("q.db").to_str().unwrap(), &key).unwrap();
         (dir, store)
     }
 
@@ -334,7 +410,14 @@ mod tests {
         sent1: i64,
     }
 
-    fn msg<'a>(acc: AccountId, folder: i64, uid: u32, subject: &'a str, date_ts: i64, flags: u32) -> NewMessage<'a> {
+    fn msg<'a>(
+        acc: AccountId,
+        folder: i64,
+        uid: u32,
+        subject: &'a str,
+        date_ts: i64,
+        flags: u32,
+    ) -> NewMessage<'a> {
         NewMessage {
             account_id: acc,
             folder_id: folder,
@@ -365,11 +448,32 @@ mod tests {
         let inbox1 = store.upsert_folder(acc1, "INBOX", Some("inbox")).unwrap();
         let sent1 = store.upsert_folder(acc1, "Sent", Some("sent")).unwrap();
         let inbox2 = store.upsert_folder(acc2, "INBOX", Some("inbox")).unwrap();
-        store.upsert_message(&msg(acc1, inbox1, 1, "Invoice March", 100, flags::SEEN)).unwrap();
-        store.upsert_message(&msg(acc1, inbox1, 2, "Holiday photos", 300, flags::FLAGGED | flags::HAS_ATTACHMENT)).unwrap();
-        store.upsert_message(&msg(acc2, inbox2, 1, "Invoice April", 200, 0)).unwrap();
-        store.upsert_message(&msg(acc1, sent1, 1, "Sent invoice", 400, flags::SEEN)).unwrap();
-        Fixture { acc1, acc2, inbox1, inbox2, sent1 }
+        store
+            .upsert_message(&msg(acc1, inbox1, 1, "Invoice March", 100, flags::SEEN))
+            .unwrap();
+        store
+            .upsert_message(&msg(
+                acc1,
+                inbox1,
+                2,
+                "Holiday photos",
+                300,
+                flags::FLAGGED | flags::HAS_ATTACHMENT,
+            ))
+            .unwrap();
+        store
+            .upsert_message(&msg(acc2, inbox2, 1, "Invoice April", 200, 0))
+            .unwrap();
+        store
+            .upsert_message(&msg(acc1, sent1, 1, "Sent invoice", 400, flags::SEEN))
+            .unwrap();
+        Fixture {
+            acc1,
+            acc2,
+            inbox1,
+            inbox2,
+            sent1,
+        }
     }
 
     #[test]
@@ -377,8 +481,16 @@ mod tests {
         let (_d, mut store) = open();
         let fx = fixture(&mut store);
         let q = MessageQuery::new(ListScope::UnifiedInbox);
-        let subjects: Vec<_> = store.query_messages(&q, 0, 10).unwrap().into_iter().map(|m| m.subject).collect();
-        assert_eq!(subjects, ["Holiday photos", "Invoice April", "Invoice March"]);
+        let subjects: Vec<_> = store
+            .query_messages(&q, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject)
+            .collect();
+        assert_eq!(
+            subjects,
+            ["Holiday photos", "Invoice April", "Invoice March"]
+        );
         assert_eq!(store.count_messages(&q).unwrap(), 3);
         assert_eq!(store.unified_inbox_unread().unwrap(), 2);
 
@@ -391,7 +503,12 @@ mod tests {
         let (_d, mut store) = open();
         fixture(&mut store);
         let q = MessageQuery::new(ListScope::UnifiedInbox);
-        let page: Vec<_> = store.query_messages(&q, 1, 1).unwrap().into_iter().map(|m| m.subject).collect();
+        let page: Vec<_> = store
+            .query_messages(&q, 1, 1)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject)
+            .collect();
         assert_eq!(page, ["Invoice April"]);
     }
 
@@ -404,7 +521,10 @@ mod tests {
         assert_eq!(store.count_messages(&q).unwrap(), 2);
         q.unread_only = false;
         q.starred_only = true;
-        assert_eq!(store.query_messages(&q, 0, 10).unwrap()[0].subject, "Holiday photos");
+        assert_eq!(
+            store.query_messages(&q, 0, 10).unwrap()[0].subject,
+            "Holiday photos"
+        );
         q.starred_only = false;
         q.attachments_only = true;
         assert_eq!(store.count_messages(&q).unwrap(), 1);
@@ -419,8 +539,62 @@ mod tests {
     }
 
     #[test]
+    fn label_scope_filters_messages() {
+        let (_d, mut store) = open();
+        let fx = fixture(&mut store);
+        let id = store.find_message(fx.acc1, "INBOX", 1).unwrap().unwrap();
+        let label = store.create_label("Work", "#3b7ddd").unwrap();
+        store.add_message_label(id, label).unwrap();
+        let q = MessageQuery::new(ListScope::Label(label));
+        assert_eq!(store.count_messages(&q).unwrap(), 1);
+        assert_eq!(store.query_messages(&q, 0, 10).unwrap()[0].id, id);
+    }
+
+    #[test]
+    fn labels_can_be_renamed_toggled_and_deleted() {
+        let (_d, mut store) = open();
+        let fx = fixture(&mut store);
+        let id = store.find_message(fx.acc1, "INBOX", 1).unwrap().unwrap();
+        let label = store.create_label("Work", "#3b7ddd").unwrap();
+        assert!(store.toggle_message_label(id, label).unwrap());
+        assert_eq!(store.message_labels(id).unwrap()[0].name, "Work");
+        store.rename_label(label, "Projects").unwrap();
+        assert_eq!(store.message_labels(id).unwrap()[0].name, "Projects");
+        assert!(!store.toggle_message_label(id, label).unwrap());
+        assert!(store.message_labels(id).unwrap().is_empty());
+        store.delete_label(label).unwrap();
+        assert!(store.list_labels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rules_can_be_updated_disabled_and_deleted() {
+        let (_d, mut store) = open();
+        let fx = fixture(&mut store);
+        let mut rule = Rule {
+            id: 0,
+            name: "Invoices".into(),
+            enabled: true,
+            priority: 2,
+            match_all: true,
+            conditions: vec![Condition::SubjectContains("invoice".into())],
+            actions: vec![RuleAction::Star],
+        };
+        let id = store.save_rule(Some(fx.acc1), &rule).unwrap();
+        rule.id = id;
+        rule.enabled = false;
+        store.update_rule(id, Some(fx.acc1), &rule).unwrap();
+        assert!(!store.load_all_rules(fx.acc1).unwrap()[0].enabled);
+        assert!(store.load_rules(fx.acc1).unwrap().is_empty());
+        store.delete_rule(id).unwrap();
+        assert!(store.load_all_rules(fx.acc1).unwrap().is_empty());
+    }
+
+    #[test]
     fn fts_query_is_sanitised() {
-        assert_eq!(fts_query_from_user("  foo  bar\"baz ").as_deref(), Some("\"foo\"* \"barbaz\"*"));
+        assert_eq!(
+            fts_query_from_user("  foo  bar\"baz ").as_deref(),
+            Some("\"foo\"* \"barbaz\"*")
+        );
         assert_eq!(fts_query_from_user("\"\" () *"), None);
     }
 
@@ -429,15 +603,42 @@ mod tests {
         let (_d, mut store) = open();
         let fx = fixture(&mut store);
         let id = store.find_message(fx.acc2, "INBOX", 1).unwrap().unwrap();
-        assert_eq!(store.update_flags(id, flags::SEEN | flags::FLAGGED, 0).unwrap(), Some(3));
+        assert_eq!(
+            store
+                .update_flags(id, flags::SEEN | flags::FLAGGED, 0)
+                .unwrap(),
+            Some(3)
+        );
         assert_eq!(store.update_flags(id, 0, flags::FLAGGED).unwrap(), Some(1));
 
         let loc = store.message_location(id).unwrap().unwrap();
-        assert_eq!((loc.folder.as_str(), loc.folder_role.as_deref(), loc.uid), ("INBOX", Some("inbox"), 1));
+        assert_eq!(
+            (loc.folder.as_str(), loc.folder_role.as_deref(), loc.uid),
+            ("INBOX", Some("inbox"), 1)
+        );
 
         store.delete_message(id).unwrap();
         assert!(store.get_message(id).unwrap().is_none());
         assert!(store.search("april", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_reconciliation_updates_flags_and_removes_server_missing_messages() {
+        let (_d, mut store) = open();
+        let fx = fixture(&mut store);
+        let existing = store.find_message(fx.acc1, "INBOX", 1).unwrap().unwrap();
+        let removed = store.find_message(fx.acc1, "INBOX", 2).unwrap().unwrap();
+
+        store
+            .reconcile_folder_state(fx.acc1, "INBOX", &[(1, flags::FLAGGED)])
+            .unwrap();
+
+        assert!(store.get_message(removed).unwrap().is_none());
+        assert_eq!(
+            store.get_message(existing).unwrap().unwrap().flags,
+            flags::FLAGGED
+        );
+        assert!(store.find_message(fx.acc2, "INBOX", 1).unwrap().is_some());
     }
 
     #[test]
@@ -450,7 +651,10 @@ mod tests {
         assert_eq!(tree[0].role.as_deref(), Some("inbox"));
         assert_eq!(tree[0].unread, 1);
         assert_eq!(tree[1].role.as_deref(), Some("sent"));
-        assert_eq!(store.folder_by_role(fx.acc1, "sent").unwrap().unwrap().0, fx.sent1);
+        assert_eq!(
+            store.folder_by_role(fx.acc1, "sent").unwrap().unwrap().0,
+            fx.sent1
+        );
         assert_eq!(fx.inbox1, tree[0].id);
     }
 

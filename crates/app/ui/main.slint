@@ -1,4 +1,8 @@
 import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ToolButton } from "widgets.slint";
+import { ComposeAttachment, ComposeDialog } from "compose.slint";
+import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
 export struct MessageItem {
     id: int,
@@ -23,46 +27,7 @@ export struct SidebarItem {
 export struct AttachmentChip {
     name: string,
     size: string,
-}
-
-global Theme {
-    out property <color> background: #e4e9f0;
-    out property <color> surface: #eef2f7;
-    out property <color> shadow-dark: #b8c0cc;
-    out property <color> text: #2b3340;
-    out property <color> text-dim: #6b7585;
-    out property <color> accent: #3b7ddd;
-    out property <color> accent-soft: #d6e4fa;
-    out property <color> danger: #c0392b;
-    out property <color> star: #e0a800;
-}
-
-component ToolButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> enabled: true;
-    in property <bool> active: false;
-    callback clicked;
-
-    height: 32px;
-    min-width: label.preferred-width + 24px;
-    border-radius: 8px;
-    background: !enabled ? transparent : (area.pressed ? Theme.accent-soft : (active ? Theme.accent-soft : Theme.surface));
-    drop-shadow-blur: enabled && !area.pressed ? 4px : 0px;
-    drop-shadow-offset-x: 1px;
-    drop-shadow-offset-y: 1px;
-    drop-shadow-color: Theme.shadow-dark;
-
-    label := Text {
-        text: root.text;
-        color: root.enabled ? Theme.text : Theme.text-dim.transparentize(0.4);
-        font-size: 13px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    area := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
+    index: int,
 }
 
 component FilterChip inherits Rectangle {
@@ -122,6 +87,7 @@ export component MainWindow inherits Window {
     in property <string> msg-from;
     in property <string> msg-to;
     in property <string> msg-date;
+    in property <string> msg-labels;
     in property <bool> msg-starred: false;
     in property <[AttachmentChip]> attachments;
     in property <image> body-image;
@@ -141,10 +107,65 @@ export component MainWindow inherits Window {
     callback toggle-remote();
     callback open-link();
     callback dismiss-link();
+    callback open-attachment(int);
     callback star();
     callback archive();
     callback delete-message();
     callback refresh();
+
+    // Compose
+    in-out property <bool> show-compose: false;
+    in-out property <string> compose-to;
+    in-out property <string> compose-cc;
+    in-out property <string> compose-subject;
+    in-out property <string> compose-body;
+    in property <string> compose-from;
+    in property <string> compose-error;
+    in property <image> compose-preview-image;
+    in-out property <bool> compose-preview-mode: false;
+    in property <[ComposeAttachment]> compose-attachments;
+    callback compose-new();
+    callback reply-message();
+    callback reply-all-message();
+    callback forward-message();
+    callback compose-send();
+    callback compose-discard();
+    callback compose-add-attachment();
+    callback compose-remove-attachment(int);
+    callback compose-format(string);
+    callback compose-preview();
+
+    // Rules, labels, and connection settings
+    in-out property <bool> show-manage: false;
+    callback manage-open();
+    in property <string> manage-account;
+    in property <string> manage-error;
+    in property <[ManageRule]> manage-rules;
+    in property <[ManageLabel]> manage-labels;
+    in-out property <int> manage-mode: 0;
+    in-out property <int> rule-id: -1;
+    in-out property <string> rule-name;
+    in-out property <string> rule-condition;
+    in-out property <string> rule-actions;
+    in-out property <bool> rule-enabled: true;
+    in-out property <bool> rule-match-all: true;
+    in property <string> rule-preview;
+    in-out property <int> label-id: -1;
+    in-out property <string> label-name;
+    in-out property <string> manage-imap-host;
+    in-out property <string> manage-smtp-host;
+    callback manage-next-account();
+    callback select-rule(int);
+    callback save-rule();
+    callback delete-rule();
+    callback dry-run-rules();
+    callback select-label(int);
+    callback create-label();
+    callback rename-label();
+    callback apply-label();
+    callback delete-label();
+    callback save-servers();
+    callback close-manage();
 
     // Status and add-account dialog
     in property <string> status-text;
@@ -174,7 +195,7 @@ export component MainWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (root.show-add-account || root.show-remove-account) {
+            if (root.show-add-account || root.show-remove-account || root.show-compose || root.show-manage) {
                 return reject;
             }
             if (event.modifiers.control && (event.text == "c" || event.text == "\u{3}")) {
@@ -187,6 +208,9 @@ export component MainWindow inherits Window {
             if (event.text == "e") { root.archive(); return accept; }
             if (event.text == "#") { root.delete-message(); return accept; }
             if (event.text == "s") { root.star(); return accept; }
+            if (event.text == "c") { root.compose-new(); return accept; }
+            if (event.text == "r") { root.reply-message(); return accept; }
+            if (event.text == "f") { root.forward-message(); return accept; }
             if (event.text == "/") { search.focus(); return accept; }
             reject
         }
@@ -220,7 +244,7 @@ export component MainWindow inherits Window {
                                 background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
 
                                 HorizontalLayout {
-                                    padding-left: item.kind == 2 ? 18px : 8px;
+                                    padding-left: (item.kind == 2 || item.kind == 3) ? 18px : 8px;
                                     padding-right: 8px;
                                     spacing: 6px;
                                     Text {
@@ -268,8 +292,8 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 6px;
                             ToolButton { text: "Refresh"; clicked => { root.refresh(); } }
-                            ToolButton { text: "Compose (c)"; enabled: false; }
-                            ToolButton { text: "Rules"; enabled: false; }
+                            ToolButton { text: "Compose (c)"; clicked => { root.compose-new(); } }
+                            ToolButton { text: "Manage"; clicked => { root.manage-open(); } }
                             ToolButton {
                                 text: "Add Account";
                                 clicked => { root.show-add-account = true; }
@@ -406,7 +430,9 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            ToolButton { text: "Reply (r)"; enabled: false; }
+                            ToolButton { text: "Reply (r)"; clicked => { root.reply-message(); } }
+                            ToolButton { text: "Reply all"; clicked => { root.reply-all-message(); } }
+                            ToolButton { text: "Forward (f)"; clicked => { root.forward-message(); } }
                             ToolButton { text: "Archive (e)"; clicked => { root.archive(); } }
                             ToolButton { text: "Delete (#)"; clicked => { root.delete-message(); } }
                             ToolButton {
@@ -435,6 +461,12 @@ export component MainWindow inherits Window {
                             color: Theme.text-dim;
                             overflow: elide;
                         }
+                        if root.msg-labels != "": Text {
+                            text: "Labels: " + root.msg-labels;
+                            font-size: 12px;
+                            color: Theme.accent;
+                            overflow: elide;
+                        }
                         Text {
                             text: root.msg-date;
                             font-size: 12px;
@@ -455,6 +487,10 @@ export component MainWindow inherits Window {
                                     color: Theme.text;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
+                                }
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.open-attachment(a.index); }
                                 }
                             }
                         }
@@ -632,6 +668,57 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ---------------- Compose dialog ----------------
+    if root.show-compose: ComposeDialog {
+        to <=> root.compose-to;
+        cc <=> root.compose-cc;
+        subject <=> root.compose-subject;
+        body <=> root.compose-body;
+        from-address: root.compose-from;
+        error: root.compose-error;
+        preview-image: root.compose-preview-image;
+        preview-mode: root.compose-preview-mode;
+        attachments: root.compose-attachments;
+        send => { root.compose-send(); }
+        discard => { root.compose-discard(); keys.focus(); }
+        add-attachment => { root.compose-add-attachment(); }
+        remove-attachment(index) => { root.compose-remove-attachment(index); }
+        format(format) => { root.compose-format(format); }
+        preview => { root.compose-preview(); }
+    }
+
+    // ---------------- Rules, labels and server settings ----------------
+    if root.show-manage: ManageDialog {
+        account-email: root.manage-account;
+        error: root.manage-error;
+        rules: root.manage-rules;
+        labels: root.manage-labels;
+        mode <=> root.manage-mode;
+        rule-id <=> root.rule-id;
+        rule-name <=> root.rule-name;
+        rule-condition <=> root.rule-condition;
+        rule-actions <=> root.rule-actions;
+        rule-enabled <=> root.rule-enabled;
+        rule-match-all <=> root.rule-match-all;
+        rule-preview: root.rule-preview;
+        label-id <=> root.label-id;
+        label-name <=> root.label-name;
+        imap-host <=> root.manage-imap-host;
+        smtp-host <=> root.manage-smtp-host;
+        close => { root.close-manage(); keys.focus(); }
+        next-account => { root.manage-next-account(); }
+        select-rule(id) => { root.select-rule(id); }
+        save-rule => { root.save-rule(); }
+        delete-rule => { root.delete-rule(); }
+        dry-run => { root.dry-run-rules(); }
+        select-label(id) => { root.select-label(id); }
+        create-label => { root.create-label(); }
+        rename-label => { root.rename-label(); }
+        apply-label => { root.apply-label(); }
+        delete-label => { root.delete-label(); }
+        save-servers => { root.save-servers(); }
     }
 
     // ---------------- Add account dialog ----------------

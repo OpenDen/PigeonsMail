@@ -1,0 +1,30 @@
+import { Theme } from "theme.slint";
+
+// Raised neumorphic button with a pressed state.
+export component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 32px;
+    min-width: label.preferred-width + 24px;
+    border-radius: 8px;
+    background: !enabled ? transparent : (area.pressed ? Theme.accent-soft : (active ? Theme.accent-soft : Theme.surface));
+    drop-shadow-blur: enabled && !area.pressed ? 4px : 0px;
+    drop-shadow-offset-x: 1px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.shadow-dark;
+
+    label := Text {
+        text: root.text;
+        color: root.enabled ? Theme.text : Theme.text-dim.transparentize(0.4);
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}

@@ -25,7 +25,11 @@ pub struct ParsedEmail {
 fn mime_of(part: &mail_parser::MessagePart<'_>) -> String {
     match part.content_type() {
         Some(ct) => match ct.subtype() {
-            Some(sub) => format!("{}/{}", ct.ctype().to_ascii_lowercase(), sub.to_ascii_lowercase()),
+            Some(sub) => format!(
+                "{}/{}",
+                ct.ctype().to_ascii_lowercase(),
+                sub.to_ascii_lowercase()
+            ),
             None => ct.ctype().to_ascii_lowercase(),
         },
         None => "application/octet-stream".to_string(),
@@ -33,15 +37,56 @@ fn mime_of(part: &mail_parser::MessagePart<'_>) -> String {
 }
 
 fn clean_filename(name: &str) -> String {
-    // Keep only the final path component and drop control characters.
+    // Keep only the final path component and replace characters rejected by Windows filesystems.
     let leaf = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let cleaned: String = leaf.chars().filter(|c| !c.is_control()).collect();
+    let cleaned: String = leaf
+        .chars()
+        .filter_map(|c| {
+            if c.is_control() {
+                None
+            } else if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                Some('_')
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
     let cleaned = cleaned.trim().trim_matches('.').to_string();
-    if cleaned.is_empty() {
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if cleaned.is_empty()
+        || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_digit())
+        })
+    {
         "attachment".to_string()
     } else {
         cleaned
     }
+}
+
+/// Threading headers and plain text of a received message, used to draft replies and forwards.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuoteSource {
+    /// Message-ID without angle brackets.
+    pub message_id: Option<String>,
+    /// Ids from the `References` header, without angle brackets.
+    pub references: Vec<String>,
+    pub text: String,
+}
+
+/// Reads the threading headers and plain-text body of a raw RFC 822 message.
+pub fn quote_source(raw: &[u8]) -> Option<QuoteSource> {
+    let msg = MessageParser::default().parse(raw)?;
+    Some(QuoteSource {
+        message_id: msg.message_id().map(str::to_string),
+        references: msg
+            .references()
+            .map(|l| l.iter().map(str::to_string).collect())
+            .unwrap_or_default(),
+        text: msg.body_text(0).map(|t| t.into_owned()).unwrap_or_default(),
+    })
 }
 
 /// Parses a raw RFC 822 message.
@@ -52,7 +97,11 @@ pub fn parse_email(raw: &[u8]) -> Option<ParsedEmail> {
     if bodies.is_empty() {
         bodies = msg.text_bodies().map(|t| text_to_html(&t)).collect();
     }
-    let html = if bodies.is_empty() { None } else { Some(bodies.join("\n<hr>\n")) };
+    let html = if bodies.is_empty() {
+        None
+    } else {
+        Some(bodies.join("\n<hr>\n"))
+    };
 
     let mut attachments = Vec::new();
     let mut cid_images = Vec::new();
@@ -63,7 +112,11 @@ pub fn parse_email(raw: &[u8]) -> Option<ParsedEmail> {
         let mime = mime_of(&part);
         if let Some(cid) = part.content_id() {
             if mime.starts_with("image/") {
-                let cid = cid.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+                let cid = cid
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string();
                 if part.decoded_len() <= MAX_INLINE_IMAGE_BYTES && !cid.is_empty() {
                     cid_images.push((cid, part.decoded().into_owned()));
                 }
@@ -80,7 +133,11 @@ pub fn parse_email(raw: &[u8]) -> Option<ParsedEmail> {
         }
     }
 
-    Some(ParsedEmail { html, attachments, cid_images })
+    Some(ParsedEmail {
+        html,
+        attachments,
+        cid_images,
+    })
 }
 
 /// Decodes one attachment on demand, so attachment contents are never kept in memory by default.
@@ -88,7 +145,7 @@ pub fn parse_email(raw: &[u8]) -> Option<ParsedEmail> {
 pub fn extract_attachment(raw: &[u8], part_index: usize) -> Option<(String, String, Vec<u8>)> {
     let msg = MessageParser::default().parse(raw)?;
     let part = msg.parts().nth(part_index)?;
-    if part.is_multipart() {
+    if part.is_multipart() || part.role() != PartRole::Attachment || part.is_inline() {
         return None;
     }
     Some((
@@ -127,10 +184,21 @@ pub fn preview(raw: &[u8]) -> Option<Preview> {
         }
         text.truncate(cut);
     }
-    let snippet: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect();
-    let has_attachment =
-        msg.parts().any(|p| !p.is_multipart() && p.role() == PartRole::Attachment && !p.is_inline());
-    Some(Preview { text, snippet, has_attachment })
+    let snippet: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect();
+    let has_attachment = msg
+        .parts()
+        .any(|p| !p.is_multipart() && p.role() == PartRole::Attachment && !p.is_inline());
+    Some(Preview {
+        text,
+        snippet,
+        has_attachment,
+    })
 }
 
 pub(crate) fn text_to_html(text: &str) -> String {
@@ -193,9 +261,19 @@ JVBERi0xLjQ=\r\n\
     #[test]
     fn extracts_attachment_bytes_on_demand() {
         let p = parse_email(MULTIPART).unwrap();
-        let (name, mime, bytes) = extract_attachment(MULTIPART, p.attachments[0].part_index).unwrap();
-        assert_eq!((name.as_str(), mime.as_str()), ("report.pdf", "application/pdf"));
+        let (name, mime, bytes) =
+            extract_attachment(MULTIPART, p.attachments[0].part_index).unwrap();
+        assert_eq!(
+            (name.as_str(), mime.as_str()),
+            ("report.pdf", "application/pdf")
+        );
         assert_eq!(bytes, b"%PDF-1.4");
+    }
+
+    #[test]
+    fn attachment_names_are_safe_for_user_selected_paths() {
+        assert_eq!(clean_filename(r"..\report:name?.pdf"), "report_name_.pdf");
+        assert_eq!(clean_filename("CON.txt"), "attachment");
     }
 
     #[test]

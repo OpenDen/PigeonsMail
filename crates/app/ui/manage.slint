@@ -1,0 +1,165 @@
+import { LineEdit, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ToolButton } from "widgets.slint";
+
+export struct ManageRule {
+    id: int,
+    name: string,
+    enabled: bool,
+}
+
+export struct ManageLabel {
+    id: int,
+    name: string,
+}
+
+export component ManageDialog inherits Rectangle {
+    in property <string> account-email;
+    in property <string> error;
+    in property <[ManageRule]> rules;
+    in property <[ManageLabel]> labels;
+    in-out property <int> mode: 0;
+    in-out property <int> rule-id: -1;
+    in-out property <string> rule-name;
+    in-out property <string> rule-condition;
+    in-out property <string> rule-actions;
+    in-out property <bool> rule-enabled: true;
+    in-out property <bool> rule-match-all: true;
+    in property <string> rule-preview;
+    in-out property <int> label-id: -1;
+    in-out property <string> label-name;
+    in-out property <string> imap-host;
+    in-out property <string> smtp-host;
+    callback close();
+    callback next-account();
+    callback select-rule(int);
+    callback save-rule();
+    callback delete-rule();
+    callback dry-run();
+    callback select-label(int);
+    callback create-label();
+    callback rename-label();
+    callback apply-label();
+    callback delete-label();
+    callback save-servers();
+
+    background: #00000060;
+    TouchArea { }
+
+    Rectangle {
+        width: 800px;
+        height: 620px;
+        border-radius: 14px;
+        background: Theme.surface;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                Text { text: "Manage mail"; font-size: 19px; font-weight: 700; color: Theme.text; }
+                Rectangle { horizontal-stretch: 1; }
+                ToolButton { text: root.account-email + "  ›"; clicked => { root.next-account(); } }
+                ToolButton { text: "Close"; clicked => { root.close(); } }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                ToolButton { text: "Rules"; active: root.mode == 0; clicked => { root.mode = 0; } }
+                ToolButton { text: "Labels"; active: root.mode == 1; clicked => { root.mode = 1; } }
+                ToolButton { text: "Servers"; active: root.mode == 2; clicked => { root.mode = 2; } }
+            }
+
+            if root.mode == 0: VerticalLayout {
+                spacing: 8px;
+                Text { text: "Rules are evaluated in priority order for new mail. Dry-run tests the newest 50 cached messages."; color: Theme.text-dim; font-size: 12px; }
+                ListView {
+                    height: 92px;
+                    for rule in root.rules: Rectangle {
+                        height: 32px;
+                        border-radius: 6px;
+                        background: root.rule-id == rule.id ? Theme.accent-soft : Theme.background;
+                        Text {
+                            text: (rule.enabled ? "●  " : "○  ") + rule.name;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            x: 8px;
+                        }
+                        TouchArea { clicked => { root.select-rule(rule.id); } }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { text <=> root.rule-name; placeholder-text: "Rule name"; }
+                    ToolButton {
+                        text: root.rule-enabled ? "Enabled" : "Disabled";
+                        active: root.rule-enabled;
+                        clicked => { root.rule-enabled = !root.rule-enabled; }
+                    }
+                    ToolButton {
+                        text: root.rule-match-all ? "Match all" : "Match any";
+                        active: root.rule-match-all;
+                        clicked => { root.rule-match-all = !root.rule-match-all; }
+                    }
+                }
+                LineEdit {
+                    text <=> root.rule-condition;
+                    placeholder-text: "Conditions: from:alice, subject:invoice, to:me, attachment";
+                }
+                LineEdit {
+                    text <=> root.rule-actions;
+                    placeholder-text: "Actions: star, mark-read, archive, delete, label:Work, move:Archive";
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ToolButton { text: "New"; clicked => { root.select-rule(-1); } }
+                    ToolButton { text: "Save"; clicked => { root.save-rule(); } }
+                    ToolButton { text: "Delete"; enabled: root.rule-id >= 0; clicked => { root.delete-rule(); } }
+                    ToolButton { text: "Dry run"; clicked => { root.dry-run(); } }
+                }
+                Text {
+                    text: root.rule-preview;
+                    color: Theme.text-dim;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+            }
+
+            if root.mode == 1: VerticalLayout {
+                spacing: 8px;
+                Text { text: "Labels are local to PigeonMail and can be applied to cached messages."; color: Theme.text-dim; font-size: 12px; }
+                ListView {
+                    height: 320px;
+                    for label in root.labels: Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: root.label-id == label.id ? Theme.accent-soft : Theme.background;
+                        Text { text: label.name; color: Theme.text; vertical-alignment: center; x: 8px; }
+                        TouchArea { clicked => { root.select-label(label.id); } }
+                    }
+                }
+                LineEdit { text <=> root.label-name; placeholder-text: "Label name"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ToolButton { text: "Create"; clicked => { root.create-label(); } }
+                    ToolButton { text: "Rename"; enabled: root.label-id >= 0; clicked => { root.rename-label(); } }
+                    ToolButton { text: "Toggle on open message"; clicked => { root.apply-label(); } }
+                    ToolButton { text: "Delete"; enabled: root.label-id >= 0; clicked => { root.delete-label(); } }
+                }
+            }
+
+            if root.mode == 2: VerticalLayout {
+                spacing: 10px;
+                Text { text: "Edit connection hosts for " + root.account-email + ". Restarting this account will reconnect with the saved settings."; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                Text { text: "IMAP host[:port]"; color: Theme.text-dim; font-size: 12px; }
+                LineEdit { text <=> root.imap-host; placeholder-text: "imap.example.com or imap.example.com:993"; }
+                Text { text: "SMTP host (STARTTLS on port 587)"; color: Theme.text-dim; font-size: 12px; }
+                LineEdit { text <=> root.smtp-host; placeholder-text: "smtp.example.com"; }
+                ToolButton { text: "Save and reconnect"; clicked => { root.save-servers(); } }
+            }
+
+            if root.error != "": Text { text: root.error; color: Theme.danger; font-size: 12px; wrap: word-wrap; }
+        }
+    }
+}

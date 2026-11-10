@@ -13,7 +13,7 @@ use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 use tokio_rustls::{client::TlsStream, TlsConnector};
 use zeroize::Zeroizing;
 
-use crate::events::{FetchedMessage, FolderInfo};
+use crate::events::{FetchedMessage, FolderInfo, MessageState};
 use crate::oauth::xoauth2_string;
 
 pub type ImapSession = async_imap::Session<TlsStream<TcpStream>>;
@@ -54,11 +54,12 @@ impl Authenticator for XOAuth2 {
 fn tls_connector() -> TlsConnector {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring provider supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     TlsConnector::from(Arc::new(config))
 }
 
@@ -67,8 +68,12 @@ pub async fn connect(settings: &ImapSettings, credential: &Credential) -> Result
     let tcp = TcpStream::connect((settings.host.as_str(), settings.port))
         .await
         .with_context(|| format!("cannot reach {}:{}", settings.host, settings.port))?;
-    let server_name = ServerName::try_from(settings.host.clone()).context("invalid IMAP host name")?;
-    let tls = tls_connector().connect(server_name, tcp).await.context("TLS handshake failed")?;
+    let server_name =
+        ServerName::try_from(settings.host.clone()).context("invalid IMAP host name")?;
+    let tls = tls_connector()
+        .connect(server_name, tcp)
+        .await
+        .context("TLS handshake failed")?;
 
     let mut client = async_imap::Client::new(tls);
     client.read_response().await.context("no IMAP greeting")?;
@@ -81,7 +86,9 @@ pub async fn connect(settings: &ImapSettings, credential: &Credential) -> Result
         Credential::OAuth2AccessToken(tok) => client
             .authenticate(
                 "XOAUTH2",
-                XOAuth2 { payload: Zeroizing::new(xoauth2_string(&settings.username, tok)) },
+                XOAuth2 {
+                    payload: Zeroizing::new(xoauth2_string(&settings.username, tok)),
+                },
             )
             .await
             .map_err(|(e, _)| anyhow!("IMAP XOAUTH2 failed: {e}"))?,
@@ -95,14 +102,24 @@ pub async fn supports_idle(session: &mut ImapSession) -> Result<bool> {
 
 /// Lists selectable folders with their roles.
 pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>> {
-    let names: Vec<_> = session.list(Some(""), Some("*")).await?.try_collect().await?;
+    let names: Vec<_> = session
+        .list(Some(""), Some("*"))
+        .await?
+        .try_collect()
+        .await?;
     let mut out = Vec::new();
     for n in &names {
-        if n.attributes().iter().any(|a| matches!(a, NameAttribute::NoSelect)) {
+        if n.attributes()
+            .iter()
+            .any(|a| matches!(a, NameAttribute::NoSelect))
+        {
             continue;
         }
         let role = folder_role(n.name(), n.attributes());
-        out.push(FolderInfo { name: n.name().to_string(), role });
+        out.push(FolderInfo {
+            name: n.name().to_string(),
+            role,
+        });
     }
     Ok(out)
 }
@@ -124,7 +141,11 @@ fn folder_role(name: &str, attrs: &[NameAttribute<'_>]) -> Option<String> {
         return Some(role.into());
     }
     // Servers without SPECIAL-USE: fall back to common names.
-    let leaf = name.rsplit(['/', '.']).next().unwrap_or(name).to_ascii_lowercase();
+    let leaf = name
+        .rsplit(['/', '.'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
     match leaf.as_str() {
         "sent" | "sent items" | "sent mail" => Some("sent".into()),
         "drafts" => Some("drafts".into()),
@@ -153,7 +174,10 @@ pub async fn sync_folder(
     now_ts: i64,
     rules: &[Rule],
 ) -> Result<FolderSync> {
-    let mailbox = session.select(folder).await.with_context(|| format!("cannot select {folder}"))?;
+    let mailbox = session
+        .select(folder)
+        .await
+        .with_context(|| format!("cannot select {folder}"))?;
     let uidvalidity = mailbox.uid_validity.unwrap_or(0);
 
     let (reset, last_uid) = match known {
@@ -167,19 +191,30 @@ pub async fn sync_folder(
     } else {
         format!("UID {}:*", last_uid.saturating_add(1))
     };
-    let mut uids: Vec<u32> = session.uid_search(&query).await?.into_iter().filter(|u| *u > last_uid).collect();
+    let mut uids: Vec<u32> = session
+        .uid_search(&query)
+        .await?
+        .into_iter()
+        .filter(|u| *u > last_uid)
+        .collect();
     uids.sort_unstable();
 
     let mut messages = Vec::with_capacity(uids.len());
     for chunk in uids.chunks(FETCH_CHUNK) {
-        let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        let set = chunk
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         let fetches: Vec<_> = session
             .uid_fetch(&set, "(UID FLAGS BODY.PEEK[HEADER])")
             .await?
             .try_collect()
             .await?;
         for f in &fetches {
-            let (Some(uid), Some(header)) = (f.uid, f.header()) else { continue };
+            let (Some(uid), Some(header)) = (f.uid, f.header()) else {
+                continue;
+            };
             let mut bits = 0;
             for flag in f.flags() {
                 bits |= match flag {
@@ -194,7 +229,50 @@ pub async fn sync_folder(
             messages.push(parse_header(uid, bits, header, now_ts, rules));
         }
     }
-    Ok(FolderSync { uidvalidity, reset, messages })
+    Ok(FolderSync {
+        uidvalidity,
+        reset,
+        messages,
+    })
+}
+
+/// Fetches only UIDs and flags so periodic sync can reconcile updates and server-side removals
+/// without downloading message bodies or reparsing unchanged headers.
+pub async fn folder_state(session: &mut ImapSession, folder: &str) -> Result<Vec<MessageState>> {
+    session
+        .select(folder)
+        .await
+        .with_context(|| format!("cannot select {folder}"))?;
+    let mut uids: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
+    uids.sort_unstable();
+    let mut states = Vec::with_capacity(uids.len());
+    for chunk in uids.chunks(FETCH_CHUNK) {
+        let set = chunk
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches: Vec<_> = session
+            .uid_fetch(&set, "(UID FLAGS)")
+            .await?
+            .try_collect()
+            .await?;
+        for fetch in fetches {
+            let Some(uid) = fetch.uid else { continue };
+            let bits = fetch.flags().fold(0, |bits, flag| {
+                bits | match flag {
+                    Flag::Seen => flags::SEEN,
+                    Flag::Flagged => flags::FLAGGED,
+                    Flag::Answered => flags::ANSWERED,
+                    Flag::Draft => flags::DRAFT,
+                    Flag::Deleted => flags::DELETED,
+                    _ => 0,
+                }
+            });
+            states.push(MessageState { uid, flags: bits });
+        }
+    }
+    Ok(states)
 }
 
 /// Largest message the lazy fetch will download.
@@ -228,27 +306,45 @@ pub struct Caps {
 
 pub async fn capabilities(session: &mut ImapSession) -> Result<Caps> {
     let c = session.capabilities().await?;
-    Ok(Caps { idle: c.has_str("IDLE"), move_ext: c.has_str("MOVE"), uidplus: c.has_str("UIDPLUS") })
+    Ok(Caps {
+        idle: c.has_str("IDLE"),
+        move_ext: c.has_str("MOVE"),
+        uidplus: c.has_str("UIDPLUS"),
+    })
 }
 
 /// Downloads the full raw message without marking it as read.
 pub async fn fetch_body(session: &mut ImapSession, folder: &str, uid: u32) -> Result<Vec<u8>> {
-    session.select(folder).await.with_context(|| format!("cannot select {folder}"))?;
+    session
+        .select(folder)
+        .await
+        .with_context(|| format!("cannot select {folder}"))?;
     fetch_selected_body(session, uid).await
 }
 
 /// Fetches a message from the currently selected folder.
 pub async fn fetch_selected_body(session: &mut ImapSession, uid: u32) -> Result<Vec<u8>> {
-    let sizes: Vec<_> = session.uid_fetch(uid.to_string(), "(RFC822.SIZE)").await?.try_collect().await?;
+    let sizes: Vec<_> = session
+        .uid_fetch(uid.to_string(), "(RFC822.SIZE)")
+        .await?
+        .try_collect()
+        .await?;
     match sizes.iter().find_map(|f| f.size) {
         Some(sz) if sz > MAX_BODY_BYTES => {
-            anyhow::bail!("message is too large to display ({} MB)", sz / (1024 * 1024))
+            anyhow::bail!(
+                "message is too large to display ({} MB)",
+                sz / (1024 * 1024)
+            )
         }
         None if sizes.is_empty() => anyhow::bail!("message no longer exists on the server"),
         _ => {}
     }
 
-    let fetches: Vec<_> = session.uid_fetch(uid.to_string(), "BODY.PEEK[]").await?.try_collect().await?;
+    let fetches: Vec<_> = session
+        .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+        .await?
+        .try_collect()
+        .await?;
     fetches
         .iter()
         .find_map(|f| f.body().map(<[u8]>::to_vec))
@@ -262,21 +358,49 @@ pub async fn set_flags(
     add: &[ImapFlag],
     remove: &[ImapFlag],
 ) -> Result<()> {
-    session.select(folder).await.with_context(|| format!("cannot select {folder}"))?;
+    session
+        .select(folder)
+        .await
+        .with_context(|| format!("cannot select {folder}"))?;
     for (sign, flags) in [("+", add), ("-", remove)] {
         if flags.is_empty() {
             continue;
         }
-        let list = flags.iter().map(|f| f.token()).collect::<Vec<_>>().join(" ");
+        let list = flags
+            .iter()
+            .map(|f| f.token())
+            .collect::<Vec<_>>()
+            .join(" ");
         let query = format!("{sign}FLAGS.SILENT ({list})");
-        let _: Vec<_> = session.uid_store(uid.to_string(), query).await?.try_collect().await?;
+        let _: Vec<_> = session
+            .uid_store(uid.to_string(), query)
+            .await?
+            .try_collect()
+            .await?;
     }
     Ok(())
 }
 
+/// Files a sent message in a folder (e.g. Sent) and marks it as read.
+pub async fn append_message(session: &mut ImapSession, folder: &str, raw: &[u8]) -> Result<()> {
+    session
+        .append(folder, Some("(\\Seen)"), None, raw)
+        .await
+        .with_context(|| format!("cannot save to {folder}"))
+}
+
 /// Moves a message (server-side MOVE, or COPY + delete + expunge as a fallback).
-pub async fn move_message(session: &mut ImapSession, from: &str, to: &str, uid: u32, caps: Caps) -> Result<()> {
-    session.select(from).await.with_context(|| format!("cannot select {from}"))?;
+pub async fn move_message(
+    session: &mut ImapSession,
+    from: &str,
+    to: &str,
+    uid: u32,
+    caps: Caps,
+) -> Result<()> {
+    session
+        .select(from)
+        .await
+        .with_context(|| format!("cannot select {from}"))?;
     if caps.move_ext {
         session.uid_mv(uid.to_string(), to).await?;
     } else {
@@ -287,15 +411,31 @@ pub async fn move_message(session: &mut ImapSession, from: &str, to: &str, uid: 
 }
 
 /// Permanently deletes a message from `folder`.
-pub async fn expunge_message(session: &mut ImapSession, folder: &str, uid: u32, caps: Caps) -> Result<()> {
-    session.select(folder).await.with_context(|| format!("cannot select {folder}"))?;
+pub async fn expunge_message(
+    session: &mut ImapSession,
+    folder: &str,
+    uid: u32,
+    caps: Caps,
+) -> Result<()> {
+    session
+        .select(folder)
+        .await
+        .with_context(|| format!("cannot select {folder}"))?;
     expunge_selected(session, uid, caps).await
 }
 
 async fn expunge_selected(session: &mut ImapSession, uid: u32, caps: Caps) -> Result<()> {
-    let _: Vec<_> = session.uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)").await?.try_collect().await?;
+    let _: Vec<_> = session
+        .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+        .await?
+        .try_collect()
+        .await?;
     if caps.uidplus {
-        let _: Vec<_> = session.uid_expunge(uid.to_string()).await?.try_collect().await?;
+        let _: Vec<_> = session
+            .uid_expunge(uid.to_string())
+            .await?
+            .try_collect()
+            .await?;
     } else {
         // Without UIDPLUS this also removes other messages already flagged \Deleted.
         let _: Vec<_> = session.expunge().await?.try_collect().await?;
@@ -304,7 +444,9 @@ async fn expunge_selected(session: &mut ImapSession, uid: u32, caps: Caps) -> Re
 }
 
 fn format_addresses(list: Option<AddressList<'_>>) -> String {
-    let Some(list) = list else { return String::new() };
+    let Some(list) = list else {
+        return String::new();
+    };
     list.mailboxes()
         .map(|a| match (a.name(), a.address()) {
             (Some(n), Some(e)) if !n.is_empty() => format!("{n} <{e}>"),
@@ -318,15 +460,25 @@ fn format_addresses(list: Option<AddressList<'_>>) -> String {
 }
 
 /// Builds a message summary from raw header bytes and evaluates the rules against it.
-pub fn parse_header(uid: u32, flag_bits: u32, header: &[u8], now_ts: i64, rules: &[Rule]) -> FetchedMessage {
+pub fn parse_header(
+    uid: u32,
+    flag_bits: u32,
+    header: &[u8],
+    now_ts: i64,
+    rules: &[Rule],
+) -> FetchedMessage {
     let parsed = MessageParser::default().parse_headers(header);
     let (msgid, from, to, subject, date_ts, has_attachment) = match &parsed {
         Some(m) => {
             // Without a body structure, `multipart/mixed` is the practical attachment signal.
             let has_attachment = m
                 .content_type()
-                .map(|ct| ct.ctype().eq_ignore_ascii_case("multipart")
-                    && ct.subtype().is_some_and(|s| s.eq_ignore_ascii_case("mixed")))
+                .map(|ct| {
+                    ct.ctype().eq_ignore_ascii_case("multipart")
+                        && ct
+                            .subtype()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("mixed"))
+                })
                 .unwrap_or(false);
             (
                 m.message_id().map(str::to_string),
@@ -337,7 +489,14 @@ pub fn parse_header(uid: u32, flag_bits: u32, header: &[u8], now_ts: i64, rules:
                 has_attachment,
             )
         }
-        None => (None, String::new(), String::new(), String::new(), now_ts, false),
+        None => (
+            None,
+            String::new(),
+            String::new(),
+            String::new(),
+            now_ts,
+            false,
+        ),
     };
 
     let summary = MessageSummary {
@@ -356,12 +515,24 @@ pub fn parse_header(uid: u32, flag_bits: u32, header: &[u8], now_ts: i64, rules:
     };
     let rule_actions = evaluate_rules(rules, &summary);
 
-    FetchedMessage { uid, msgid, from, to, subject, date_ts, flags: flag_bits, has_attachment, rule_actions }
+    FetchedMessage {
+        uid,
+        msgid,
+        from,
+        to,
+        subject,
+        date_ts,
+        flags: flag_bits,
+        has_attachment,
+        rule_actions,
+    }
 }
 
 /// Formats a Unix timestamp as an IMAP `date` (`1-Oct-2026`) in UTC.
 pub fn imap_date(ts: i64) -> String {
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     // Howard Hinnant's civil-from-days algorithm.
     let z = ts.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
@@ -390,7 +561,10 @@ mod tests {
     #[test]
     fn roles_from_attributes_and_names() {
         assert_eq!(folder_role("inbox", &[]).as_deref(), Some("inbox"));
-        assert_eq!(folder_role("[Gmail]/Sent Mail", &[NameAttribute::Sent]).as_deref(), Some("sent"));
+        assert_eq!(
+            folder_role("[Gmail]/Sent Mail", &[NameAttribute::Sent]).as_deref(),
+            Some("sent")
+        );
         assert_eq!(folder_role("INBOX.Trash", &[]).as_deref(), Some("trash"));
         assert_eq!(folder_role("Projects", &[]), None);
     }
@@ -410,7 +584,10 @@ Content-Type: multipart/mixed; boundary=xyz\r\n\r\n";
             enabled: true,
             priority: 0,
             match_all: true,
-            conditions: vec![Condition::SubjectContains("invoice".into()), Condition::HasAttachment],
+            conditions: vec![
+                Condition::SubjectContains("invoice".into()),
+                Condition::HasAttachment,
+            ],
             actions: vec![RuleAction::Star],
         }];
         let m = parse_header(7, flags::SEEN, HEADER, 99, &rules);

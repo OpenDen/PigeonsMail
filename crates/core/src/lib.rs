@@ -7,6 +7,8 @@ pub type MessageId = i64;
 pub type LabelId = i64;
 
 /// Bit flags stored in `messages.flags`.
+pub mod compose;
+
 pub mod flags {
     pub const SEEN: u32 = 1;
     pub const FLAGGED: u32 = 1 << 1;
@@ -42,6 +44,9 @@ pub struct OutgoingMail {
     pub body_html: Option<String>,
     /// (filename, mime, bytes)
     pub attachments: Vec<(String, String, Vec<u8>)>,
+    /// Message-ID of the message being replied to, for `In-Reply-To` and `References`.
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,26 +148,52 @@ mod tests {
         }
     }
 
-    fn rule(priority: i32, match_all: bool, conditions: Vec<Condition>, actions: Vec<RuleAction>) -> Rule {
-        Rule { id: priority as i64, name: "r".into(), enabled: true, priority, match_all, conditions, actions }
+    fn rule(
+        priority: i32,
+        match_all: bool,
+        conditions: Vec<Condition>,
+        actions: Vec<RuleAction>,
+    ) -> Rule {
+        Rule {
+            id: priority as i64,
+            name: "r".into(),
+            enabled: true,
+            priority,
+            match_all,
+            conditions,
+            actions,
+        }
     }
 
     #[test]
     fn matches_case_insensitively() {
-        let r = rule(0, true, vec![Condition::FromContains("alice@example".into())], vec![RuleAction::Star]);
+        let r = rule(
+            0,
+            true,
+            vec![Condition::FromContains("alice@example".into())],
+            vec![RuleAction::Star],
+        );
         assert!(r.matches(&msg()));
     }
 
     #[test]
     fn match_all_requires_every_condition() {
-        let conds = vec![Condition::SubjectContains("report".into()), Condition::HasAttachment];
+        let conds = vec![
+            Condition::SubjectContains("report".into()),
+            Condition::HasAttachment,
+        ];
         assert!(!rule(0, true, conds.clone(), vec![]).matches(&msg()));
         assert!(rule(0, false, conds, vec![]).matches(&msg()));
     }
 
     #[test]
     fn disabled_or_empty_rules_never_match() {
-        let mut r = rule(0, true, vec![Condition::SubjectContains("report".into())], vec![]);
+        let mut r = rule(
+            0,
+            true,
+            vec![Condition::SubjectContains("report".into())],
+            vec![],
+        );
         r.enabled = false;
         assert!(!r.matches(&msg()));
         assert!(!rule(0, true, vec![], vec![]).matches(&msg()));
@@ -173,7 +204,12 @@ mod tests {
         let c = vec![Condition::SubjectContains("report".into())];
         let rules = vec![
             rule(2, true, c.clone(), vec![RuleAction::Delete]),
-            rule(1, true, c.clone(), vec![RuleAction::MarkRead, RuleAction::StopProcessing]),
+            rule(
+                1,
+                true,
+                c.clone(),
+                vec![RuleAction::MarkRead, RuleAction::StopProcessing],
+            ),
         ];
         assert_eq!(
             evaluate_rules(&rules, &msg()),
@@ -188,6 +224,9 @@ mod tests {
             rule(5, true, c.clone(), vec![RuleAction::Archive]),
             rule(1, true, c, vec![RuleAction::Star]),
         ];
-        assert_eq!(evaluate_rules(&rules, &msg()), vec![RuleAction::Star, RuleAction::Archive]);
+        assert_eq!(
+            evaluate_rules(&rules, &msg()),
+            vec![RuleAction::Star, RuleAction::Archive]
+        );
     }
 }

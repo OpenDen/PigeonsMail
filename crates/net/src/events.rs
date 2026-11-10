@@ -32,10 +32,22 @@ pub enum SyncStatus {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageState {
+    pub uid: u32,
+    pub flags: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
-    Status { account_id: AccountId, status: SyncStatus },
-    Folders { account_id: AccountId, folders: Vec<FolderInfo> },
+    Status {
+        account_id: AccountId,
+        status: SyncStatus,
+    },
+    Folders {
+        account_id: AccountId,
+        folders: Vec<FolderInfo>,
+    },
     /// `reset` means the server's UIDVALIDITY changed and cached messages for the folder are stale.
     Messages {
         account_id: AccountId,
@@ -44,8 +56,35 @@ pub enum SyncEvent {
         reset: bool,
         messages: Vec<FetchedMessage>,
     },
+    FolderState {
+        account_id: AccountId,
+        folder: String,
+        states: Vec<MessageState>,
+    },
     /// A full raw message downloaded on demand.
-    BodyFetched { account_id: AccountId, folder: String, uid: u32, raw: Vec<u8> },
+    BodyFetched {
+        account_id: AccountId,
+        folder: String,
+        uid: u32,
+        raw: Vec<u8>,
+    },
     /// A user action (body fetch, flag change, move, delete) failed on the server.
-    ActionFailed { account_id: AccountId, folder: String, uid: u32, error: String },
+    ActionFailed {
+        account_id: AccountId,
+        folder: String,
+        uid: u32,
+        error: String,
+    },
+    /// The message was accepted by the SMTP server. `copy_error` is set when the Sent copy could not be saved.
+    Sent {
+        account_id: AccountId,
+        subject: String,
+        copy_error: Option<String>,
+    },
+    /// The message was not sent.
+    SendFailed {
+        account_id: AccountId,
+        subject: String,
+        error: String,
+    },
 }

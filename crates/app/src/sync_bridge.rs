@@ -21,22 +21,50 @@ pub struct ServerAction {
 }
 
 pub fn now_ts() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Applies one event to the store and returns the server-side actions it triggered.
 pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<ServerAction>> {
     let mut server = Vec::new();
     match event {
-        SyncEvent::Status { .. } | SyncEvent::ActionFailed { .. } => {}
-        SyncEvent::Folders { account_id, folders } => {
+        SyncEvent::Status { .. }
+        | SyncEvent::ActionFailed { .. }
+        | SyncEvent::Sent { .. }
+        | SyncEvent::SendFailed { .. } => {}
+        SyncEvent::FolderState {
+            account_id,
+            folder,
+            states,
+        } => {
+            let states: Vec<(u32, u32)> = states
+                .iter()
+                .map(|state| (state.uid, state.flags))
+                .collect();
+            store.reconcile_folder_state(*account_id, folder, &states)?;
+        }
+        SyncEvent::Folders {
+            account_id,
+            folders,
+        } => {
             for f in folders {
                 store.upsert_folder(*account_id, &f.name, f.role.as_deref())?;
             }
         }
-        SyncEvent::Messages { account_id, folder, uidvalidity, reset, messages } => {
+        SyncEvent::Messages {
+            account_id,
+            folder,
+            uidvalidity,
+            reset,
+            messages,
+        } => {
             let folder_id = store.upsert_folder(*account_id, folder, None)?;
-            let stored_last = store.folder_sync_state(*account_id, folder)?.map_or(0, |(_, _, last)| last);
+            let stored_last = store
+                .folder_sync_state(*account_id, folder)?
+                .map_or(0, |(_, _, last)| last);
             if *reset {
                 store.clear_folder_messages(folder_id)?;
             }
@@ -61,7 +89,9 @@ pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<Serve
                         }
                         RuleAction::AddLabel(l) => labels.push(*l),
                         RuleAction::Archive if relocate.is_none() => {
-                            relocate = store.folder_by_role(*account_id, "archive")?.map(|(_, n)| n);
+                            relocate = store
+                                .folder_by_role(*account_id, "archive")?
+                                .map(|(_, n)| n);
                         }
                         RuleAction::Delete if relocate.is_none() => {
                             relocate = store.folder_by_role(*account_id, "trash")?.map(|(_, n)| n);
@@ -93,14 +123,23 @@ pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<Serve
                 if let Some(to) = relocate.filter(|to| to != folder) {
                     server.push(ServerAction {
                         account_id: *account_id,
-                        action: MailAction::Move { folder: folder.clone(), to, uid: m.uid },
+                        action: MailAction::Move {
+                            folder: folder.clone(),
+                            to,
+                            uid: m.uid,
+                        },
                     });
                     store.delete_message(id)?;
                 }
             }
             store.set_folder_sync_state(folder_id, *uidvalidity, last_uid)?;
         }
-        SyncEvent::BodyFetched { account_id, folder, uid, raw } => {
+        SyncEvent::BodyFetched {
+            account_id,
+            folder,
+            uid,
+            raw,
+        } => {
             // The message may have been moved or deleted while the download was in flight.
             if let Some(id) = store.find_message(*account_id, folder, *uid)? {
                 let preview = mailthin_render::preview(raw);
@@ -119,7 +158,12 @@ pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<Serve
 fn flag_action(account_id: AccountId, folder: &str, uid: u32, flag: ImapFlag) -> ServerAction {
     ServerAction {
         account_id,
-        action: MailAction::SetFlags { folder: folder.to_string(), uid, add: vec![flag], remove: vec![] },
+        action: MailAction::SetFlags {
+            folder: folder.to_string(),
+            uid,
+            add: vec![flag],
+            remove: vec![],
+        },
     }
 }
 
@@ -128,8 +172,11 @@ fn account_of(event: &SyncEvent) -> AccountId {
         SyncEvent::Status { account_id, .. }
         | SyncEvent::Folders { account_id, .. }
         | SyncEvent::Messages { account_id, .. }
+        | SyncEvent::FolderState { account_id, .. }
         | SyncEvent::BodyFetched { account_id, .. }
-        | SyncEvent::ActionFailed { account_id, .. } => *account_id,
+        | SyncEvent::ActionFailed { account_id, .. }
+        | SyncEvent::Sent { account_id, .. }
+        | SyncEvent::SendFailed { account_id, .. } => *account_id,
     }
 }
 
@@ -156,7 +203,13 @@ pub fn spawn_store_writer(
                         account_id: account_of(&event),
                         status: SyncStatus::Error(error.clone()),
                     });
-                    if let SyncEvent::BodyFetched { account_id, folder, uid, .. } = &event {
+                    if let SyncEvent::BodyFetched {
+                        account_id,
+                        folder,
+                        uid,
+                        ..
+                    } = &event
+                    {
                         on_event(&SyncEvent::ActionFailed {
                             account_id: *account_id,
                             folder: folder.clone(),
@@ -208,8 +261,19 @@ mod tests {
         }
     }
 
-    fn messages(acc: AccountId, uidvalidity: u32, reset: bool, m: Vec<FetchedMessage>) -> SyncEvent {
-        SyncEvent::Messages { account_id: acc, folder: "INBOX".into(), uidvalidity, reset, messages: m }
+    fn messages(
+        acc: AccountId,
+        uidvalidity: u32,
+        reset: bool,
+        m: Vec<FetchedMessage>,
+    ) -> SyncEvent {
+        SyncEvent::Messages {
+            account_id: acc,
+            folder: "INBOX".into(),
+            uidvalidity,
+            reset,
+            messages: m,
+        }
     }
 
     fn folders(acc: AccountId, list: &[(&str, &str)]) -> SyncEvent {
@@ -217,7 +281,10 @@ mod tests {
             account_id: acc,
             folders: list
                 .iter()
-                .map(|(n, r)| FolderInfo { name: n.to_string(), role: Some(r.to_string()) })
+                .map(|(n, r)| FolderInfo {
+                    name: n.to_string(),
+                    role: Some(r.to_string()),
+                })
                 .collect(),
         }
     }
@@ -226,8 +293,16 @@ mod tests {
     fn stores_folders_messages_and_resume_state() {
         let (_d, mut store, acc) = open();
         apply_event(&mut store, &folders(acc, &[("INBOX", "inbox")])).unwrap();
-        apply_event(&mut store, &messages(acc, 42, false, vec![msg(5, "Invoice", vec![]), msg(9, "Hello", vec![])]))
-            .unwrap();
+        apply_event(
+            &mut store,
+            &messages(
+                acc,
+                42,
+                false,
+                vec![msg(5, "Invoice", vec![]), msg(9, "Hello", vec![])],
+            ),
+        )
+        .unwrap();
 
         assert_eq!(store.folder_states(acc).unwrap()["INBOX"], (42, 9));
         assert_eq!(store.search("invoice", 10).unwrap().len(), 1);
@@ -240,7 +315,11 @@ mod tests {
     #[test]
     fn rule_actions_update_flags_and_resolve_server_actions() {
         let (_d, mut store, acc) = open();
-        apply_event(&mut store, &folders(acc, &[("INBOX", "inbox"), ("Archive", "archive")])).unwrap();
+        apply_event(
+            &mut store,
+            &folders(acc, &[("INBOX", "inbox"), ("Archive", "archive")]),
+        )
+        .unwrap();
         let actions = apply_event(
             &mut store,
             &messages(
@@ -248,7 +327,11 @@ mod tests {
                 1,
                 false,
                 vec![
-                    msg(3, "starred", vec![RuleAction::Star, RuleAction::AddLabel(99)]),
+                    msg(
+                        3,
+                        "starred",
+                        vec![RuleAction::Star, RuleAction::AddLabel(99)],
+                    ),
                     msg(4, "archived", vec![RuleAction::Archive]),
                     msg(5, "plain", vec![]),
                 ],
@@ -257,11 +340,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(actions.len(), 2);
-        assert!(matches!(&actions[0].action, MailAction::SetFlags { uid: 3, add, .. } if add == &[ImapFlag::Flagged]));
-        assert!(matches!(&actions[1].action, MailAction::Move { uid: 4, to, .. } if to == "Archive"));
+        assert!(
+            matches!(&actions[0].action, MailAction::SetFlags { uid: 3, add, .. } if add == &[ImapFlag::Flagged])
+        );
+        assert!(
+            matches!(&actions[1].action, MailAction::Move { uid: 4, to, .. } if to == "Archive")
+        );
 
         let q = MessageQuery::new(ListScope::UnifiedInbox);
-        let subjects: Vec<_> = store.query_messages(&q, 0, 10).unwrap().into_iter().map(|m| m.subject).collect();
+        let subjects: Vec<_> = store
+            .query_messages(&q, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject)
+            .collect();
         assert_eq!(subjects, ["plain", "starred"]);
         let starred = store.find_message(acc, "INBOX", 3).unwrap().unwrap();
         assert!(store.get_message(starred).unwrap().unwrap().is_starred());
@@ -270,8 +362,11 @@ mod tests {
     #[test]
     fn unresolvable_move_is_ignored_and_keeps_the_message() {
         let (_d, mut store, acc) = open();
-        let actions =
-            apply_event(&mut store, &messages(acc, 1, false, vec![msg(1, "x", vec![RuleAction::Archive])])).unwrap();
+        let actions = apply_event(
+            &mut store,
+            &messages(acc, 1, false, vec![msg(1, "x", vec![RuleAction::Archive])]),
+        )
+        .unwrap();
         assert!(actions.is_empty());
         assert!(store.find_message(acc, "INBOX", 1).unwrap().is_some());
     }
@@ -279,29 +374,57 @@ mod tests {
     #[test]
     fn body_fetch_caches_body_and_updates_preview() {
         let (_d, mut store, acc) = open();
-        apply_event(&mut store, &messages(acc, 1, false, vec![msg(7, "Subject", vec![])])).unwrap();
+        apply_event(
+            &mut store,
+            &messages(acc, 1, false, vec![msg(7, "Subject", vec![])]),
+        )
+        .unwrap();
         let raw = b"Subject: Subject\r\nContent-Type: text/plain\r\n\r\nhello zebra world".to_vec();
         apply_event(
             &mut store,
-            &SyncEvent::BodyFetched { account_id: acc, folder: "INBOX".into(), uid: 7, raw: raw.clone() },
+            &SyncEvent::BodyFetched {
+                account_id: acc,
+                folder: "INBOX".into(),
+                uid: 7,
+                raw: raw.clone(),
+            },
         )
         .unwrap();
 
         let id = store.find_message(acc, "INBOX", 7).unwrap().unwrap();
         assert_eq!(store.get_body(id, 1).unwrap().unwrap(), raw);
-        assert_eq!(store.get_message(id).unwrap().unwrap().snippet, "hello zebra world");
+        assert_eq!(
+            store.get_message(id).unwrap().unwrap().snippet,
+            "hello zebra world"
+        );
         assert_eq!(store.search("zebra", 10).unwrap(), vec![id]);
 
         // A body for a message that no longer exists is dropped without error.
-        apply_event(&mut store, &SyncEvent::BodyFetched { account_id: acc, folder: "INBOX".into(), uid: 99, raw })
-            .unwrap();
+        apply_event(
+            &mut store,
+            &SyncEvent::BodyFetched {
+                account_id: acc,
+                folder: "INBOX".into(),
+                uid: 99,
+                raw,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
     fn uidvalidity_reset_clears_old_messages_and_index() {
         let (_d, mut store, acc) = open();
-        apply_event(&mut store, &messages(acc, 1, false, vec![msg(1, "oldsubject", vec![])])).unwrap();
-        apply_event(&mut store, &messages(acc, 2, true, vec![msg(1, "newsubject", vec![])])).unwrap();
+        apply_event(
+            &mut store,
+            &messages(acc, 1, false, vec![msg(1, "oldsubject", vec![])]),
+        )
+        .unwrap();
+        apply_event(
+            &mut store,
+            &messages(acc, 2, true, vec![msg(1, "newsubject", vec![])]),
+        )
+        .unwrap();
 
         assert!(store.search("oldsubject", 10).unwrap().is_empty());
         assert_eq!(store.search("newsubject", 10).unwrap().len(), 1);
@@ -314,12 +437,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let (ptx, _prx) = std::sync::mpsc::channel();
         let h = spawn_store_writer(store, rx, ptx, |_| {});
-        tx.blocking_send(messages(acc, 7, false, vec![msg(2, "threaded", vec![])])).unwrap();
+        tx.blocking_send(messages(acc, 7, false, vec![msg(2, "threaded", vec![])]))
+            .unwrap();
         drop(tx);
         h.join().unwrap();
 
         let key = Zeroizing::new("ab".repeat(32));
-        let store = MailStore::open_encrypted(dir.path().join("m.db").to_str().unwrap(), &key).unwrap();
+        let store =
+            MailStore::open_encrypted(dir.path().join("m.db").to_str().unwrap(), &key).unwrap();
         assert_eq!(store.folder_states(acc).unwrap()["INBOX"], (7, 2));
     }
 }

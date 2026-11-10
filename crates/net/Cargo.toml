@@ -12,6 +12,7 @@ webpki-roots.workspace = true
 futures.workspace = true
 url.workspace = true
 async-imap.workspace = true
+lettre.workspace = true
 mail-parser.workspace = true
 oauth2.workspace = true
 reqwest.workspace = true

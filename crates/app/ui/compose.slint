@@ -1,0 +1,106 @@
+import { LineEdit, TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ToolButton } from "widgets.slint";
+
+export struct ComposeAttachment {
+    name: string,
+    size: string,
+    index: int,
+}
+
+// Modal compose window. It only holds the fields; the app owns sending and discarding.
+export component ComposeDialog inherits Rectangle {
+    in-out property <string> to;
+    in-out property <string> cc;
+    in-out property <string> subject;
+    in-out property <string> body;
+    in property <string> from-address;
+    in property <string> error;
+    in property <image> preview-image;
+    in-out property <bool> preview-mode: false;
+    in property <[ComposeAttachment]> attachments;
+    callback send();
+    callback discard();
+    callback add-attachment();
+    callback remove-attachment(int);
+    callback format(string);
+    callback preview();
+
+    background: #00000060;
+    TouchArea { }
+
+    Rectangle {
+        width: 760px;
+        height: 650px;
+        border-radius: 14px;
+        background: Theme.surface;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 8px;
+
+            Text { text: "New message"; font-size: 18px; font-weight: 700; color: Theme.text; }
+            Text { text: "From " + root.from-address; font-size: 12px; color: Theme.text-dim; }
+            Text { text: "To"; font-size: 12px; color: Theme.text-dim; }
+            LineEdit { text <=> root.to; placeholder-text: "name@example.com, another@example.com"; }
+            Text { text: "Cc"; font-size: 12px; color: Theme.text-dim; }
+            LineEdit { text <=> root.cc; }
+            Text { text: "Subject"; font-size: 12px; color: Theme.text-dim; }
+            LineEdit { text <=> root.subject; }
+            HorizontalLayout {
+                spacing: 6px;
+                ToolButton { text: "Bold"; clicked => { root.format("bold"); } }
+                ToolButton { text: "Italic"; clicked => { root.format("italic"); } }
+                ToolButton { text: "Link"; clicked => { root.format("link"); } }
+                ToolButton { text: "Quote"; clicked => { root.format("quote"); } }
+                ToolButton { text: "List"; clicked => { root.format("list"); } }
+                ToolButton { text: "Add file"; clicked => { root.add-attachment(); } }
+                ToolButton {
+                    text: root.preview-mode ? "Edit" : "Preview";
+                    clicked => {
+                        root.preview-mode = !root.preview-mode;
+                        if root.preview-mode { root.preview(); }
+                    }
+                }
+            }
+            if root.attachments.length > 0: HorizontalLayout {
+                spacing: 6px;
+                for a in root.attachments: ToolButton {
+                    text: a.name + " (" + a.size + ") ×";
+                    clicked => { root.remove-attachment(a.index); }
+                }
+            }
+            if !root.preview-mode: TextEdit {
+                text <=> root.body;
+                wrap: word-wrap;
+                font-size: 13px;
+                vertical-stretch: 1;
+                placeholder-text: "Write in Markdown. Use the formatting controls or open Preview.";
+            }
+            if root.preview-mode: Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                border-radius: 8px;
+                background: white;
+                Image {
+                    source: root.preview-image;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: contain;
+                }
+            }
+            if root.error != "": Text {
+                text: root.error;
+                color: Theme.danger;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                ToolButton { text: "Discard"; clicked => { root.discard(); } }
+                ToolButton { text: "Send"; clicked => { root.send(); } }
+            }
+        }
+    }
+}

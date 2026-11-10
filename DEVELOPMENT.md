@@ -5,9 +5,10 @@ been built so far, the libraries used, how the work progressed, what is still pe
 build, run and test the app.
 
 > **Status in one line:** Phase 1, Steps 1A–1C of [Implementation_Plan.md](./Implementation_Plan.md)
-> are implemented and unit-tested (60 tests pass). Step 1D (compose/send, attachment save/open,
-> rules UI) and Phase 2 (Calendar) are not started. The IMAP/SMTP code has **not yet been run
-> against a real mail server**; see [Verification status](#6-verification-status).
+> are implemented and unit-tested (62 tests pass). Gmail sign-in with Google works end to end: the
+> account is added to PigeonMail. Step 1D (compose/send, attachment save/open, rules UI) and Phase 2
+> (Calendar) are not started. Sync, IDLE and flag changes have **not yet been exercised against a
+> live mailbox**; see [Verification status](#6-verification-status).
 
 ---
 
@@ -39,7 +40,7 @@ build, run and test the app.
 | Body cache with LRU eviction | Done | 300 bodies kept; oldest evicted |
 | Account secrets in OS keyring | Done | Windows Credential Manager |
 | IMAP login (app password) | Done, untested on a live server | TLS (port 993) via rustls |
-| IMAP login (OAuth2 XOAUTH2) | Wired to the Add Account dialog; **not tested against live providers** | Gmail and Outlook loopback + PKCE flow; needs client IDs (section 8.6) |
+| IMAP login (OAuth2 XOAUTH2) | Gmail **verified live**: sign-in and account add succeed. Outlook wired but **not tested** (no client ID yet) | Loopback + PKCE flow; client IDs in section 8.6 |
 | Multi-account sync (one Tokio task per account) | Done, untested on a live server | Folder list, 30-day header window, incremental UID sync, UIDVALIDITY handling |
 | IMAP IDLE with polling fallback | Done, untested on a live server | IDLE watches INBOX only |
 | Rules engine | Done | Priority ordered; runs on every newly fetched message |
@@ -51,7 +52,7 @@ build, run and test the app.
 | Remote image blocking + opt-in load | Done | HTTPS only, size cap, private addresses refused |
 | Archive / Delete / Star (`e`, `#`, `s`) | Done, untested on a live server | Delete moves to Trash; deleting from Trash is permanent |
 | Attachment list in reader | Done (names and sizes only) | Cannot open or save yet |
-| Add Account dialog | Done | App-password IMAP only |
+| Add Account dialog | Done | App-password IMAP, and Sign in with Google (verified) |
 | Reply / Compose / Send | **Not started** | Step 1D |
 | Attachment save / open | **Not started** | Step 1D |
 | Rules builder UI | **Not started** | Step 1D (rules can only be added through the store API) |
@@ -302,6 +303,17 @@ The work followed the plan's order (1A → 1B → 1C) in three working sessions.
    Interactive clicking could not be completed because another actor was moving the mouse on the
    machine. The temporary seeding and preview code was deleted afterwards.
 
+### Session 4 — Gmail sign-in verified and renamed to PigeonMail
+
+1. Gmail sign-in reached the IMAP test and failed with `IMAP XOAUTH2 failed ... AUTHENTICATIONFAILED
+   Invalid credentials`. The XOAUTH2 string and base64 encoding were checked and are correct
+   (`async-imap` encodes the SASL response itself). The account email, IMAP enablement and browser
+   account were also confirmed. The most likely cause is that Gmail access was not granted on the
+   consent screen; after the sign-in was retried, the account was added successfully.
+2. The app was renamed to **PigeonMail** in the window title, sidebar, OAuth pages and startup error.
+   Crate names, the data folder and the keyring service were kept so existing data still opens.
+3. The plan and this guide were updated to match the current status.
+
 ### Design decisions worth remembering
 
 * **Never delete mail by accident:** deleting moves to Trash; only a message already in Trash is
@@ -324,8 +336,9 @@ The work followed the plan's order (1A → 1B → 1C) in three working sessions.
 | App launches, opens window, creates encrypted DB | Verified (about 57 MB working set, empty, debug build) |
 | HTML render, table, links, safe-link filter, remote-image blocking | Verified by offline render and tests |
 | Opening/clicking/scrolling in the live window | **Not verified** (see Session 3 note) |
-| IMAP connect, sync, IDLE, fetch, flags, move, expunge against a real server | **Not verified** |
-| OAuth flow against Google/Microsoft | **Not verified** (no client IDs available yet; code is wired to the Add Account dialog) |
+| Gmail OAuth sign-in and account add (XOAUTH2 IMAP login accepted by Gmail) | **Verified** on Windows with a real Gmail account |
+| IMAP sync, IDLE, fetch, flags, move, expunge against a real server | **Not verified** (login only) |
+| Outlook / Microsoft OAuth sign-in | **Not verified** (no Microsoft client ID built in yet) |
 | Release build | **Not built** |
 | Memory targets (under 120 MB idle / 150 MB active) | **Not measured**; no claim is made |
 | 3 accounts syncing concurrently | **Not tested** |
@@ -348,8 +361,9 @@ The work followed the plan's order (1A → 1B → 1C) in three working sessions.
 
 * **Real-server testing** of everything in `net` (highest priority). Start with an app-password
   IMAP account on a throwaway mailbox.
-* **OAuth verification:** the sign-in buttons, token refresh and keyring storage are implemented
-  but still need a live test with real client IDs. Google requires app verification before
+* **OAuth verification:** Gmail sign-in is verified live (account add). Still to do: token refresh
+  after the access token expires, the keyring-stored refresh token across restarts, and a Microsoft
+  sign-in test once a Microsoft client ID is built in. Google requires app verification before
   general release (until then only listed test users can sign in). Microsoft has largely disabled
   basic-auth IMAP for Outlook.com / Microsoft 365, so Outlook accounts depend on this path.
 * **Server-side changes are not picked up:** flags changed or messages deleted elsewhere are not
@@ -428,8 +442,9 @@ and shows an empty window. To try it with a real mailbox:
 
 1. Click **Add Account**.
 2. Enter your email address. For Gmail or Outlook, click **Sign in with Google** or **Sign in with
-   Microsoft**; your browser opens and no password is stored. For other providers, enter an
-   **app password** (not your normal password):
+   Microsoft**; your browser opens and no password is stored. On the Google consent screen, tick the
+   Gmail access box; the browser then shows "Sign-in complete" and the account is added. For other
+   providers, enter an **app password** (not your normal password):
    * Other providers: use the provider's app-password or IMAP password feature.
 3. Leave the server fields blank to guess them from the address (for example `imap.gmail.com`), or
    enter them; use `host` and a port field (default 993, implicit TLS only).
@@ -490,7 +505,8 @@ mobile/desktop redirect `http://localhost` and the delegated permissions `IMAP.A
 
 Google apps in testing mode accept only the test users listed on the OAuth consent screen. Sign-in
 for any other account needs Google's app verification, which includes a security assessment for the
-restricted Gmail scope.
+restricted Gmail scope. While the app is unverified, Google shows "Google hasn't verified this app";
+click **Advanced**, then **Go to PigeonMail (unsafe)**. Only test users can get this far.
 
 
 
@@ -504,6 +520,10 @@ restricted Gmail scope.
 | Database key (256-bit, hex) | Windows Credential Manager, service `mailthin`, user `database-key` |
 | Account passwords / refresh tokens | Windows Credential Manager, service `mailthin`, user `account:<email>` |
 | Cached message bodies | Inside the encrypted database (`bodies` table) |
+
+The app is called PigeonMail in the UI, but the data folder, keyring service and `MAILTHIN_*`
+environment variables keep the original internal name `Mailthin`. Renaming them would hide existing
+accounts and mail from the app.
 
 **Important:** if the database key is deleted from the Credential Manager, the database can no longer
 be opened. If you delete the database file but keep the key, the app simply creates a new database.
@@ -528,6 +548,8 @@ OAuth scopes requested (only what IMAP/SMTP needs): Gmail `https://mail.google.c
 | Login fails | The dialog shows the server's reason. Use an app password (not your normal password) for password sign-in, confirm IMAP is enabled, and check host and port |
 | `Login failed: ... is not configured in this build` | The Google secret was not supplied at build time (section 8.6) |
 | `Sign-in timed out` or the browser shows a redirect error | Complete the browser sign-in within 5 minutes; check that the provider's OAuth client allows a loopback redirect |
+| `IMAP XOAUTH2 failed ... AUTHENTICATIONFAILED Invalid credentials` after Google sign-in | Google did not grant Gmail access. Remove PigeonMail at https://myaccount.google.com/permissions, then sign in again and tick the Gmail access box |
+| Browser shows "Google hasn't verified this app" and no sign-in | The Google account is not a test user of the OAuth app. Add it under the OAuth consent screen's test users |
 | Messages appear but body never loads | Check the status bar for a server error; large messages over 40 MB are refused by design |
 | Remote images stay blocked | Click **Load remote images**; images over 5 MB, non-HTTPS, or on private addresses are refused by design |
 

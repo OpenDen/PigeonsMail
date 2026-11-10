@@ -476,6 +476,11 @@ Your `.slint` UI now incorporates all Phase 1 views inside a single window using
 
 ### Execution Order Within Phase 1 (4 Milestones, 1 Unified Deliverable)
 
+**Status (see [DEVELOPMENT.md](./DEVELOPMENT.md) section 2 for detail):** Steps 1A, 1B and 1C are
+implemented and unit-tested. Gmail sign-in (OAuth2 XOAUTH2) works and adds the account to PigeonMail.
+Live sync, IDLE and flag changes still need a real-mailbox test. Step 1D is not started. Outlook
+sign-in needs a Microsoft client ID.
+
 To build all of Phase 1 cleanly without getting blocked by interconnected parts, write the code inside your 5 crates in this exact sequence:
 
 1. **Step 1A — Storage & Auth (`store` + `net/oauth`):**

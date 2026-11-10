@@ -1,4 +1,6 @@
 /target
+/dist
+*.exe
 *.db
 *.db-wal
 *.db-shm

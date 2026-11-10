@@ -48,9 +48,20 @@ mailthin-render = { path = "crates/render" }
 litehtml-sys = { path = "vendor/litehtml-sys" }
 litehtml = { path = "vendor/litehtml" }
 
+[profile.dev]
+opt-level = 0
+# Line tables only: drastically slashes target/ debug folder size (cuts GBs of PDB bloat) while keeping file:line backtraces
+debug = 1
+split-debuginfo = "unpacked"
+
+# Optimize heavy dependencies (argon2, slint, litehtml, openssl) in debug so the app runs smoothly
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
-opt-level = "s"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
+opt-level = "z"        # Optimize aggressively for binary size
+lto = "thin"           # "thin" is dramatically faster to compile and link than "fat", with 95%+ the size reduction
+codegen-units = 1      # Maximizes dead code removal and optimization
+panic = "abort"        # Eliminates unwinding landing pads and EH frame tables
+strip = true           # Strips symbols completely from final executable
+debug = 0              # Zero debug symbols generated in release, saving gigabytes in target/

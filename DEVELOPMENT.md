@@ -1,6 +1,6 @@
-# Mailthin — Development Guide and Status
+# PigeonMail — Development Guide and Status
 
-Mailthin is a desktop mail client written in Rust with a Slint UI. This document records what has
+PigeonMail is a desktop mail client written in Rust with a Slint UI. This document records what has
 been built so far, the libraries used, how the work progressed, what is still pending, and how to
 build, run and test the app.
 

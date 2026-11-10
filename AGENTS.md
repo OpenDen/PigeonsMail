@@ -4,7 +4,7 @@
 
 - The Rust workspace exists and Steps 1A to 1C of `Implementation_Plan.md` are implemented (storage, auth, sync, rules, reading pane, archive/delete/star). Step 1D (compose, attachments save/open, rules UI) is not. Verify the actual files and dependency APIs before copying example code from the plan; several plan snippets were corrected (raw SQLCipher key syntax, `contentless_delete`, rule priority ordering).
 - On Windows, run `. .\scripts\dev-env.ps1` before `cargo` (Strawberry Perl is needed for the vendored OpenSSL). `vendor/litehtml-sys` carries local MSVC build patches; see its `PATCHES.txt`.
-- The intended product is Mailthin, a desktop mail client. Phase 1 is the complete mail client; Calendar is Phase 2 and should not expand Phase 1 work unless explicitly requested.
+- The intended product is PigeonMail, a desktop mail client. Phase 1 is the complete mail client; Calendar is Phase 2 and should not expand Phase 1 work unless explicitly requested.
 - The workspace has five crates: `core`, `store`, `net`, `render`, and `app`. Keep their dependency direction and responsibilities clear.
 
 ## Architecture

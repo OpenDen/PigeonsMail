@@ -278,8 +278,8 @@ fn wait_for_code(server: &tiny_http::Server, expected_state: &str, timeout: Dura
         };
         let outcome = parse_callback(request.url(), expected_state);
         let (status, body) = match &outcome {
-            Callback::Code(_) => (200, "Sign-in complete. You can close this tab and return to Mailthin."),
-            _ => (400, "Sign-in failed. You can close this tab and try again from Mailthin."),
+            Callback::Code(_) => (200, "Sign-in complete. You can close this tab and return to PigeonMail."),
+            _ => (400, "Sign-in failed. You can close this tab and try again from PigeonMail."),
         };
         let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(status));
         match outcome {

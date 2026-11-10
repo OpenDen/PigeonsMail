@@ -1,0 +1,24 @@
+[package]
+name = "mailthin-app"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+mailthin-core.workspace = true
+mailthin-store.workspace = true
+mailthin-net.workspace = true
+mailthin-render.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+chrono.workspace = true
+slint.workspace = true
+open.workspace = true
+zeroize.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

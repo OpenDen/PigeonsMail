@@ -1,0 +1,13 @@
+Local patches to litehtml-sys 0.2.5 (https://github.com/franzos/litehtml-rs, MIT AND BSD-3-Clause AND Apache-2.0)
+so that it builds with MSVC. Everything else is unchanged from the published crate.
+
+- build.rs: do not link `stdc++` on MSVC; compile with /utf-8 and /permissive-; add `compat/` to
+  the gumbo include path.
+- compat/strings.h: POSIX <strings.h> shim (strcasecmp/strncasecmp) for MSVC.
+- csrc/litehtml_c.cpp: pass `std::string` to `css::parse_css_stylesheet` in
+  `lh_document_add_stylesheet`; the `const char*` instantiation is never emitted, which fails to link.
+- csrc/litehtml_c.cpp: `lh_document_create_from_string` appends a caller-supplied master CSS to
+  litehtml's built-in master CSS instead of replacing it (replacing it removes all element defaults).
+
+Drop this directory and the `[patch.crates-io]` entry in the workspace Cargo.toml once upstream
+builds on MSVC.

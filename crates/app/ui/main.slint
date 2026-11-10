@@ -1,0 +1,681 @@
+import { Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+
+export struct MessageItem {
+    id: int,
+    sender: string,
+    subject: string,
+    snippet: string,
+    date: string,
+    unread: bool,
+    starred: bool,
+    has-attachment: bool,
+}
+
+// kind: 0 = unified inbox, 1 = account header, 2 = folder
+export struct SidebarItem {
+    kind: int,
+    title: string,
+    unread: int,
+    folder-id: int,
+    account-id: int,
+}
+
+export struct AttachmentChip {
+    name: string,
+    size: string,
+}
+
+global Theme {
+    out property <color> background: #e4e9f0;
+    out property <color> surface: #eef2f7;
+    out property <color> shadow-dark: #b8c0cc;
+    out property <color> text: #2b3340;
+    out property <color> text-dim: #6b7585;
+    out property <color> accent: #3b7ddd;
+    out property <color> accent-soft: #d6e4fa;
+    out property <color> danger: #c0392b;
+    out property <color> star: #e0a800;
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 32px;
+    min-width: label.preferred-width + 24px;
+    border-radius: 8px;
+    background: !enabled ? transparent : (area.pressed ? Theme.accent-soft : (active ? Theme.accent-soft : Theme.surface));
+    drop-shadow-blur: enabled && !area.pressed ? 4px : 0px;
+    drop-shadow-offset-x: 1px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.shadow-dark;
+
+    label := Text {
+        text: root.text;
+        color: root.enabled ? Theme.text : Theme.text-dim.transparentize(0.4);
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component FilterChip inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> active;
+    callback toggled;
+
+    height: 26px;
+    min-width: label.preferred-width + 20px;
+    border-radius: 13px;
+    background: active ? Theme.accent : Theme.background;
+    label := Text {
+        text: root.text;
+        font-size: 12px;
+        color: root.active ? white : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        clicked => {
+            root.active = !root.active;
+            root.toggled();
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Mailthin";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 900px;
+    min-height: 560px;
+    background: Theme.background;
+
+    // Sidebar
+    in property <[SidebarItem]> sidebar;
+    in-out property <int> selected-folder: -1;
+    callback select-folder(int);
+
+    // Message list
+    in property <[MessageItem]> messages;
+    in property <int> selected-message: -1;
+    in property <int> message-count: 0;
+    in-out property <string> search-text;
+    in-out property <bool> filter-unread;
+    in-out property <bool> filter-starred;
+    in-out property <bool> filter-attachments;
+    callback select-message(int);
+    callback search-changed(string);
+    callback filters-changed();
+
+    // Reader
+    in property <bool> has-message: false;
+    in property <bool> loading: false;
+    in property <string> reader-error;
+    in property <string> msg-subject;
+    in property <string> msg-from;
+    in property <string> msg-to;
+    in property <string> msg-date;
+    in property <bool> msg-starred: false;
+    in property <[AttachmentChip]> attachments;
+    in property <image> body-image;
+    in property <float> scroll-start: 0;
+    in property <float> scroll-size: 1;
+    in property <bool> body-link-hover: false;
+    in property <int> remote-blocked: 0;
+    in property <bool> remote-loading: false;
+    in property <string> pending-link;
+    callback viewport-resized(length, length);
+    callback body-scrolled(length);
+    callback body-clicked(length, length);
+    callback body-hover(length, length);
+    callback toggle-remote();
+    callback open-link();
+    callback dismiss-link();
+    callback star();
+    callback archive();
+    callback delete-message();
+    callback refresh();
+
+    // Status and add-account dialog
+    in property <string> status-text;
+    in-out property <bool> show-add-account: false;
+    in property <string> add-account-error;
+    callback add-account(string, string, string, string, string);
+    callback email-edited(string);
+
+    in-out property <bool> show-remove-account: false;
+    in-out property <int> remove-account-id: -1;
+    in-out property <string> remove-account-email;
+    callback remove-account(int);
+
+    in-out property <string> acc-email;
+    in-out property <string> acc-password;
+    in-out property <string> acc-imap-host;
+    in-out property <string> acc-imap-port: "993";
+    in-out property <string> acc-smtp-host;
+
+    init => {
+        // The custom neumorphic theme is light-only; keep std widgets (LineEdit) light as well.
+        Palette.color-scheme = ColorScheme.light;
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || root.show-add-account || root.show-remove-account) {
+                return reject;
+            }
+            if (event.text == "e") { root.archive(); return accept; }
+            if (event.text == "#") { root.delete-message(); return accept; }
+            if (event.text == "s") { root.star(); return accept; }
+            if (event.text == "/") { search.focus(); return accept; }
+            reject
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                spacing: 10px;
+                padding: 10px;
+
+                // ---------------- Sidebar ----------------
+                Rectangle {
+                    width: 220px;
+                    background: Theme.surface;
+                    border-radius: 12px;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Mailthin";
+                            font-size: 20px;
+                            font-weight: 700;
+                            color: Theme.text;
+                        }
+
+                        ListView {
+                            for item in root.sidebar: Rectangle {
+                                height: item.kind == 1 ? 34px : 32px;
+                                border-radius: 8px;
+                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
+
+                                HorizontalLayout {
+                                    padding-left: item.kind == 2 ? 18px : 8px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: item.title;
+                                        font-size: item.kind == 1 ? 11px : 13px;
+                                        font-weight: item.kind == 0 ? 700 : 400;
+                                        color: item.kind == 1 ? Theme.text-dim : Theme.text;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    if item.unread > 0: Text {
+                                        text: item.unread;
+                                        font-size: 11px;
+                                        color: Theme.accent;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                    }
+                                    if item.kind == 1: Rectangle {
+                                        width: 56px;
+                                        Text {
+                                            text: "Remove";
+                                            font-size: 11px;
+                                            color: Theme.danger;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        TouchArea {
+                                            clicked => {
+                                                root.remove-account-id = item.account-id;
+                                                root.remove-account-email = item.title;
+                                                root.show-remove-account = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if item.kind != 1: TouchArea {
+                                    clicked => {
+                                        keys.focus();
+                                        root.select-folder(item.folder-id);
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            ToolButton { text: "Refresh"; clicked => { root.refresh(); } }
+                            ToolButton { text: "Compose (c)"; enabled: false; }
+                            ToolButton { text: "Rules"; enabled: false; }
+                            ToolButton {
+                                text: "Add Account";
+                                clicked => { root.show-add-account = true; }
+                            }
+                            ToolButton { text: "Calendar"; enabled: false; }
+                        }
+                    }
+                }
+
+                // ---------------- Message list ----------------
+                Rectangle {
+                    width: 320px;
+                    background: Theme.surface;
+                    border-radius: 12px;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        search := LineEdit {
+                            placeholder-text: "Search mail ( / )";
+                            text <=> root.search-text;
+                            edited(t) => { root.search-changed(t); }
+                            accepted => { keys.focus(); }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            FilterChip {
+                                text: "Unread";
+                                active <=> root.filter-unread;
+                                toggled => { keys.focus(); root.filters-changed(); }
+                            }
+                            FilterChip {
+                                text: "Starred";
+                                active <=> root.filter-starred;
+                                toggled => { keys.focus(); root.filters-changed(); }
+                            }
+                            FilterChip {
+                                text: "Attachments";
+                                active <=> root.filter-attachments;
+                                toggled => { keys.focus(); root.filters-changed(); }
+                            }
+                        }
+
+                        ListView {
+                            for m in root.messages: Rectangle {
+                                height: 72px;
+                                border-radius: 8px;
+                                background: root.selected-message == m.id ? Theme.accent-soft : transparent;
+
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 2px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: m.sender;
+                                            font-size: 13px;
+                                            font-weight: m.unread ? 700 : 400;
+                                            color: Theme.text;
+                                            overflow: elide;
+                                        }
+                                        if m.has-attachment: Rectangle {
+                                            width: 26px;
+                                            height: 16px;
+                                            y: 3px;
+                                            border-radius: 8px;
+                                            background: Theme.background;
+                                            Text {
+                                                text: "att";
+                                                font-size: 10px;
+                                                color: Theme.text-dim;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        if m.starred: Text {
+                                            text: "★";
+                                            font-size: 13px;
+                                            color: Theme.star;
+                                        }
+                                        Text {
+                                            text: m.date;
+                                            font-size: 11px;
+                                            color: Theme.text-dim;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: m.subject;
+                                        font-size: 13px;
+                                        font-weight: m.unread ? 600 : 400;
+                                        color: Theme.text;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: m.snippet;
+                                        font-size: 12px;
+                                        color: Theme.text-dim;
+                                        overflow: elide;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        keys.focus();
+                                        root.select-message(m.id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------------- Reading pane ----------------
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.surface;
+                    border-radius: 12px;
+
+                    if !root.has-message: Text {
+                        text: root.message-count == 0 ? "No messages" : "Select a message to read";
+                        color: Theme.text-dim;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    if root.has-message: VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            ToolButton { text: "Reply (r)"; enabled: false; }
+                            ToolButton { text: "Archive (e)"; clicked => { root.archive(); } }
+                            ToolButton { text: "Delete (#)"; clicked => { root.delete-message(); } }
+                            ToolButton {
+                                text: root.msg-starred ? "Unstar (s)" : "Star (s)";
+                                active: root.msg-starred;
+                                clicked => { root.star(); }
+                            }
+                        }
+
+                        Text {
+                            text: root.msg-subject;
+                            font-size: 20px;
+                            font-weight: 700;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: "From: " + root.msg-from;
+                            font-size: 12px;
+                            color: Theme.text-dim;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "To: " + root.msg-to;
+                            font-size: 12px;
+                            color: Theme.text-dim;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.msg-date;
+                            font-size: 12px;
+                            color: Theme.text-dim;
+                        }
+
+                        if root.attachments.length > 0: HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for a in root.attachments: Rectangle {
+                                height: 28px;
+                                min-width: chip-label.preferred-width + 20px;
+                                border-radius: 14px;
+                                background: Theme.background;
+                                chip-label := Text {
+                                    text: a.name + "  (" + a.size + ")";
+                                    font-size: 12px;
+                                    color: Theme.text;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Viewport canvas for the rendered message
+                        Rectangle {
+                            vertical-stretch: 1;
+                            background: white;
+                            border-radius: 8px;
+                            clip: true;
+
+                            changed width => { root.viewport-resized(self.width, self.height); }
+                            changed height => { root.viewport-resized(self.width, self.height); }
+
+                            Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.body-image;
+                                image-fit: fill;
+                            }
+
+                            if root.loading: Text {
+                                text: "Downloading message...";
+                                color: #6b7585;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            if root.reader-error != "": Text {
+                                text: root.reader-error;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            // Scroll indicator
+                            if root.scroll-size < 1: Rectangle {
+                                x: parent.width - 6px;
+                                y: root.scroll-start * parent.height;
+                                width: 4px;
+                                height: root.scroll-size * parent.height;
+                                border-radius: 2px;
+                                background: #00000040;
+                            }
+
+                            TouchArea {
+                                mouse-cursor: root.body-link-hover ? MouseCursor.pointer : MouseCursor.default;
+                                scroll-event(e) => {
+                                    root.body-scrolled(e.delta-y);
+                                    accept
+                                }
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.move) {
+                                        root.body-hover(self.mouse-x, self.mouse-y);
+                                    }
+                                }
+                                clicked => {
+                                    keys.focus();
+                                    root.body-clicked(self.mouse-x, self.mouse-y);
+                                }
+                            }
+
+                            // Overlays sit on top of the canvas so showing them never resizes it.
+                            if root.pending-link != "": Rectangle {
+                                y: 0px;
+                                height: 40px;
+                                background: Theme.accent-soft;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    Text {
+                                        text: "Open " + root.pending-link + " ?";
+                                        font-size: 12px;
+                                        color: Theme.text;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    ToolButton { text: "Open"; y: 4px; clicked => { root.open-link(); } }
+                                    ToolButton { text: "Cancel"; y: 4px; clicked => { root.dismiss-link(); } }
+                                }
+                            }
+
+                            if root.remote-blocked > 0: Rectangle {
+                                y: parent.height - self.height;
+                                height: 40px;
+                                background: #fff4d6;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    Text {
+                                        text: root.remote-blocked + " remote image(s) blocked to protect your privacy";
+                                        font-size: 12px;
+                                        color: Theme.text;
+                                        vertical-alignment: center;
+                                    }
+                                    ToolButton {
+                                        text: root.remote-loading ? "Loading..." : "Load remote images";
+                                        enabled: !root.remote-loading;
+                                        y: 4px;
+                                        clicked => { root.toggle-remote(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------------- Status bar ----------------
+            Rectangle {
+                height: 26px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    Text {
+                        text: root.status-text;
+                        font-size: 12px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------- Remove account confirmation ----------------
+    if root.show-remove-account: Rectangle {
+        background: #00000060;
+        TouchArea { }
+
+        Rectangle {
+            width: 380px;
+            height: 200px;
+            border-radius: 14px;
+            background: Theme.surface;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                Text { text: "Remove account?"; font-size: 18px; font-weight: 700; color: Theme.text; }
+                Text {
+                    text: "\{root.remove-account-email} and its synced mail will be deleted from this device. Mail on the server is not affected.";
+                    font-size: 12px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    ToolButton {
+                        text: "Cancel";
+                        clicked => { root.show-remove-account = false; keys.focus(); }
+                    }
+                    ToolButton {
+                        text: "Remove";
+                        clicked => {
+                            root.show-remove-account = false;
+                            root.remove-account(root.remove-account-id);
+                            keys.focus();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------- Add account dialog ----------------
+    if root.show-add-account: Rectangle {
+        background: #00000060;
+        TouchArea { }
+
+        Rectangle {
+            width: 420px;
+            height: 440px;
+            border-radius: 14px;
+            background: Theme.surface;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 8px;
+
+                Text { text: "Add mail account"; font-size: 18px; font-weight: 700; color: Theme.text; }
+                Text {
+                    text: "IMAP with an app password. Passwords are kept in the OS keyring.";
+                    font-size: 12px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+                Text { text: "Email address"; font-size: 12px; color: Theme.text-dim; }
+                LineEdit {
+                    text <=> root.acc-email;
+                    placeholder-text: "you@example.com";
+                    edited => { root.email-edited(self.text); }
+                }
+                Text { text: "App password"; font-size: 12px; color: Theme.text-dim; }
+                LineEdit { text <=> root.acc-password; input-type: password; }
+                Text { text: "IMAP server (blank = guess from address)"; font-size: 12px; color: Theme.text-dim; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { text <=> root.acc-imap-host; placeholder-text: "auto from email address"; }
+                    LineEdit { text <=> root.acc-imap-port; width: 70px; }
+                }
+                Text { text: "SMTP server (blank = guess from address)"; font-size: 12px; color: Theme.text-dim; }
+                LineEdit { text <=> root.acc-smtp-host; placeholder-text: "auto from email address"; }
+                if root.add-account-error != "": Text {
+                    text: root.add-account-error;
+                    color: Theme.danger;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    ToolButton {
+                        text: "Cancel";
+                        clicked => { root.show-add-account = false; keys.focus(); }
+                    }
+                    ToolButton {
+                        text: "Add";
+                        clicked => {
+                            root.add-account(root.acc-email, root.acc-password, root.acc-imap-host,
+                                root.acc-imap-port, root.acc-smtp-host);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

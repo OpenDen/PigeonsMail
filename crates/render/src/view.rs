@@ -1,0 +1,285 @@
+//! HTML email rendering into an RGBA viewport using `litehtml`, plus link hit-testing.
+//!
+//! Remote content is never fetched here: remote image URLs are only *reported*, and the caller
+//! decides whether to download them and hand the bytes back via [`EmailView::load_remote_images`].
+use std::collections::HashSet;
+
+use anyhow::{anyhow, Result};
+use litehtml::email::{prepare_email_html, EMAIL_MASTER_CSS};
+use litehtml::pixbuf::PixbufContainer;
+use litehtml::{Document, DocumentContainer, DrawContext, Position};
+
+use crate::mime::{text_to_html, ParsedEmail};
+
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    /// Opaque RGBA (row-major), composited over white.
+    pub rgba: Vec<u8>,
+}
+
+/// A laid-out email. Dropping it frees the parsed document, its images and the pixel buffer.
+///
+/// Not `Send`: it must stay on the thread that created it.
+pub struct EmailView {
+    doc: Option<Document<'static>>,
+    /// Owned allocation backing `doc`'s container borrow; freed after `doc` in `Drop`.
+    container: *mut PixbufContainer,
+    width: u32,
+    height: u32,
+    scale: f32,
+    content_height: f32,
+    remote_images: Vec<String>,
+    loaded_remote: HashSet<String>,
+}
+
+impl EmailView {
+    /// `width`/`height` are the logical viewport size; `scale` is the display scale factor.
+    pub fn new(email: &ParsedEmail, width: u32, height: u32, scale: f32) -> Result<Self> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let scale = if scale.is_finite() && scale >= 1.0 { scale.min(4.0) } else { 1.0 };
+
+        let source = email.html.clone().unwrap_or_else(|| text_to_html(""));
+        // The body is already UTF-8; the BOM stops `<meta charset>` from triggering a re-decode.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(source.as_bytes());
+
+        let cid = |cid: &str| -> Option<Vec<u8>> {
+            email.cid_images.iter().find(|(id, _)| id == cid).map(|(_, b)| b.clone())
+        };
+        let prepared = prepare_email_html(&bytes, Some(&cid), None);
+
+        let mut container = Box::new(PixbufContainer::new_with_scale(width, height, scale));
+        for (uri, data) in &prepared.images {
+            container.load_image_data(uri, data);
+        }
+        let ptr = Box::into_raw(container);
+
+        // SAFETY: `ptr` stays allocated until `Drop`, which drops the document first. While the
+        // document exists the container is only touched through `Document::with_container_mut`.
+        let static_ref: &'static mut PixbufContainer = unsafe { &mut *ptr };
+        let doc = match Document::from_html(&prepared.html, static_ref, Some(EMAIL_MASTER_CSS), None) {
+            Ok(d) => d,
+            Err(e) => {
+                // SAFETY: the failed constructor kept no reference to the container.
+                unsafe { drop(Box::from_raw(ptr)) };
+                return Err(anyhow!("cannot parse email HTML: {e}"));
+            }
+        };
+
+        let mut view = Self {
+            doc: Some(doc),
+            container: ptr,
+            width,
+            height,
+            scale,
+            content_height: 0.0,
+            remote_images: Vec::new(),
+            loaded_remote: HashSet::new(),
+        };
+        view.relayout();
+
+        let pending = view.with_container(|c| c.take_pending_images());
+        view.remote_images = pending
+            .into_iter()
+            .map(|(url, _)| url)
+            .filter(|u| is_remote_url(u))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        view.remote_images.sort();
+        Ok(view)
+    }
+
+    fn with_container<R>(&mut self, f: impl FnOnce(&mut PixbufContainer) -> R) -> R {
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        // SAFETY: the container was created as a `PixbufContainer`, and no litehtml call is
+        // running while the closure executes.
+        unsafe {
+            doc.with_container_mut(|c| {
+                let p = c as *mut dyn DocumentContainer as *mut PixbufContainer;
+                f(&mut *p)
+            })
+        }
+    }
+
+    fn relayout(&mut self) {
+        let width = self.width as f32;
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        let _ = doc.render(width);
+        self.content_height = doc.height();
+    }
+
+    pub fn content_height(&self) -> u32 {
+        self.content_height.ceil() as u32
+    }
+
+    /// Remote image URLs referenced by the message (not loaded unless provided via
+    /// [`load_remote_images`](Self::load_remote_images)).
+    pub fn remote_images(&self) -> &[String] {
+        &self.remote_images
+    }
+
+    pub fn blocked_remote_images(&self) -> usize {
+        self.remote_images.iter().filter(|u| !self.loaded_remote.contains(*u)).count()
+    }
+
+    /// Supplies downloaded remote images and re-lays out the document.
+    pub fn load_remote_images(&mut self, images: Vec<(String, Vec<u8>)>) {
+        if images.is_empty() {
+            return;
+        }
+        for (url, _) in &images {
+            self.loaded_remote.insert(url.clone());
+        }
+        self.with_container(|c| {
+            for (url, data) in &images {
+                c.load_image_data(url, data);
+            }
+        });
+        self.relayout();
+    }
+
+    /// Renders the part of the document starting `scroll_y` pixels from the top.
+    pub fn render_viewport(&mut self, scroll_y: u32) -> Frame {
+        let (w, h, scale) = (self.width, self.height, self.scale);
+        let max_scroll = self.content_height().saturating_sub(h);
+        let scroll = scroll_y.min(max_scroll) as f32;
+
+        // Resizing clears the pixmap, so frames never accumulate on each other.
+        self.with_container(|c| c.resize_with_scale(w, h, scale));
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        doc.draw(
+            DrawContext::default(),
+            0.0,
+            -scroll,
+            Some(Position { x: 0.0, y: 0.0, width: w as f32, height: h as f32 }),
+        );
+
+        let (pw, ph, rgba) = self.with_container(|c| (c.width(), c.height(), flatten_on_white(c.pixels())));
+        Frame { width: pw, height: ph, rgba }
+    }
+
+    /// Whether the mouse is over a link (for the cursor shape).
+    pub fn hover_is_link(&mut self, x: f32, y: f32, scroll_y: u32) -> bool {
+        let doc_y = y + scroll_y as f32;
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        doc.on_mouse_over(x, doc_y, x, y);
+        self.with_container(|c| c.cursor() == "pointer")
+    }
+
+    /// Returns the safe (http/https/mailto) target of the link under `(x, y)` viewport
+    /// coordinates, if any.
+    pub fn link_at(&mut self, x: f32, y: f32, scroll_y: u32) -> Option<String> {
+        let doc_y = y + scroll_y as f32;
+        let doc = self.doc.as_mut().expect("document is present until drop");
+        doc.on_lbutton_down(x, doc_y, x, y);
+        doc.on_lbutton_up(x, doc_y, x, y);
+        let url = self.with_container(|c| c.take_anchor_click())?;
+        safe_link(&url)
+    }
+}
+
+impl Drop for EmailView {
+    fn drop(&mut self) {
+        self.doc.take();
+        // SAFETY: `container` came from `Box::into_raw` and the document borrowing it is gone.
+        unsafe { drop(Box::from_raw(self.container)) };
+    }
+}
+
+fn is_remote_url(url: &str) -> bool {
+    let l = url.trim_start().to_ascii_lowercase();
+    l.starts_with("http://") || l.starts_with("https://")
+}
+
+/// Only web and mail links may leave the application; everything else (file:, javascript:,
+/// custom protocol handlers, ...) is refused.
+pub fn safe_link(url: &str) -> Option<String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    let ok = ["http://", "https://", "mailto:"].iter().any(|p| lower.starts_with(p));
+    (ok && !url.chars().any(|c| c.is_control())).then(|| url.to_string())
+}
+
+/// Converts premultiplied RGBA into opaque RGBA by compositing over a white background.
+fn flatten_on_white(premul: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(premul.len());
+    for px in premul.chunks_exact(4) {
+        let inv = 255 - px[3] as u16;
+        out.push((px[0] as u16 + inv).min(255) as u8);
+        out.push((px[1] as u16 + inv).min(255) as u8);
+        out.push((px[2] as u16 + inv).min(255) as u8);
+        out.push(255);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn email(html: &str) -> ParsedEmail {
+        ParsedEmail { html: Some(html.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn safe_link_filters_schemes() {
+        assert!(safe_link("https://example.com/a?b=c").is_some());
+        assert!(safe_link("MAILTO:a@b.c").is_some());
+        assert!(safe_link("javascript:alert(1)").is_none());
+        assert!(safe_link("file:///C:/Windows/System32/calc.exe").is_none());
+        assert!(safe_link("ms-msdt:/id").is_none());
+        assert!(safe_link("https://x.com/\u{0}").is_none());
+    }
+
+    #[test]
+    fn flatten_composites_over_white() {
+        assert_eq!(flatten_on_white(&[0, 0, 0, 0]), vec![255, 255, 255, 255]);
+        assert_eq!(flatten_on_white(&[10, 20, 30, 255]), vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn renders_text_into_opaque_viewport() {
+        let mut v = EmailView::new(&email("<p>Hello world, this is a test message.</p>"), 400, 200, 1.0).unwrap();
+        assert!(v.content_height() > 0);
+        let f = v.render_viewport(0);
+        assert_eq!((f.width, f.height), (400, 200));
+        assert_eq!(f.rgba.len(), 400 * 200 * 4);
+        assert!(f.rgba.chunks_exact(4).all(|p| p[3] == 255));
+        assert!(f.rgba.chunks_exact(4).any(|p| p[0] < 128), "expected dark text pixels");
+    }
+
+    #[test]
+    fn scrolling_changes_the_frame_and_does_not_accumulate() {
+        let body: String = (0..80).map(|i| format!("<p>Line number {i}</p>")).collect();
+        let mut v = EmailView::new(&email(&body), 300, 100, 1.0).unwrap();
+        assert!(v.content_height() > 300);
+        let a = v.render_viewport(0).rgba;
+        let b = v.render_viewport(120).rgba;
+        let a2 = v.render_viewport(0).rgba;
+        assert_ne!(a, b);
+        assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn link_hit_testing_returns_href_and_ignores_unsafe_schemes() {
+        let html = "<p><a href=\"https://example.com/x\">Click this long link text</a></p>\
+                    <p style=\"margin-top:40px\"><a href=\"javascript:evil()\">Bad link text here</a></p>";
+        let mut v = EmailView::new(&email(html), 400, 300, 1.0).unwrap();
+        assert!(v.hover_is_link(10.0, 8.0, 0));
+        assert_eq!(v.link_at(10.0, 8.0, 0).as_deref(), Some("https://example.com/x"));
+        assert_eq!(v.link_at(390.0, 250.0, 0), None);
+    }
+
+    #[test]
+    fn remote_images_are_reported_but_blocked_until_provided() {
+        let html = "<p>hi</p><img src=\"https://tracker.example/p.gif\" width=\"5\" height=\"5\">";
+        let mut v = EmailView::new(&email(html), 300, 100, 1.0).unwrap();
+        assert_eq!(v.remote_images(), ["https://tracker.example/p.gif"]);
+        assert_eq!(v.blocked_remote_images(), 1);
+        v.load_remote_images(vec![("https://tracker.example/p.gif".to_string(), Vec::new())]);
+        assert_eq!(v.blocked_remote_images(), 0);
+    }
+}

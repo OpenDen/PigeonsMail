@@ -1,0 +1,19 @@
+[package]
+name = "mailthin-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mailthin-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+futures.workspace = true
+url.workspace = true
+async-imap.workspace = true
+mail-parser.workspace = true
+oauth2.workspace = true
+reqwest.workspace = true
+tiny_http.workspace = true
+zeroize.workspace = true

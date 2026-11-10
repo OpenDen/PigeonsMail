@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/store",
+    "crates/net",
+    "crates/render",
+    "crates/app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+mailthin-core = { path = "crates/core" }
+mailthin-store = { path = "crates/store" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "net", "sync", "time", "macros", "fs", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1.0"
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+url = "2.5"
+mailthin-net = { path = "crates/net" }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+keyring = { version = "3.2", features = ["windows-native"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.8"
+hex = "0.4"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+mail-parser = "1.0"
+oauth2 = "5.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tiny_http = "0.12"
+litehtml = { version = "0.2.6", features = ["vendored", "pixbuf", "email"] }
+slint = { version = "1.8", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-femtovg", "renderer-software"] }
+slint-build = "1.8"
+open = "5"
+mailthin-render = { path = "crates/render" }
+
+[patch.crates-io]
+litehtml-sys = { path = "vendor/litehtml-sys" }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,9 @@
+[package]
+name = "mailthin-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+litehtml.workspace = true
+mail-parser.workspace = true
+anyhow.workspace = true

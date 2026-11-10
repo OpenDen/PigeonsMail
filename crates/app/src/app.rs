@@ -11,11 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures::future::BoxFuture;
 use futures::StreamExt;
 use mailthin_core::{flags, AccountId, MessageId};
 use mailthin_net::imap::{Credential, ImapSettings};
+use mailthin_net::oauth::{self, OAuthProvider};
 use mailthin_net::remote::fetch_remote_image;
-use mailthin_net::worker::{spawn_account, static_credential, AccountCommand, AccountConfig, AccountHandle, MailAction};
+use mailthin_net::worker::{spawn_account, static_credential, AccountCommand, AccountConfig, AccountHandle, CredentialProvider, MailAction};
 use mailthin_net::{SyncEvent, SyncStatus};
 use mailthin_render::{parse_email, EmailView};
 use mailthin_store::{keystore, AccountRow, ListScope, MailStore, MessageLocation, MessageQuery, NewAccount};
@@ -49,14 +51,24 @@ enum UiMsg {
     LoginChecked { email: String, error: Option<String> },
 }
 
-/// A new account waiting for its login test. The password stays on the UI thread until the test passes.
+/// How a new account signs in. A password stays on the UI thread until the login test passes.
+/// OAuth sign-in runs on a background task, which stores the refresh token on success.
+enum AddSecret {
+    Password(Zeroizing<String>),
+    OAuth(&'static OAuthProvider),
+}
+
+/// A new account waiting for its login test.
 struct PendingAdd {
     email: String,
-    password: Zeroizing<String>,
+    secret: AddSecret,
     imap_host: String,
     port: u16,
     smtp_host: String,
 }
+
+/// How long the browser sign-in may take before it is abandoned.
+const OAUTH_SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn to_ui_msg(event: &SyncEvent) -> Option<UiMsg> {
     Some(match event {
@@ -655,8 +667,14 @@ impl App {
     // ----------------------------------------------------------------- accounts
 
     fn start_account(&mut self, row: &AccountRow) -> Result<()> {
-        let secret = keystore::get_account_secret(&row.email)?
-            .ok_or_else(|| anyhow!("no stored password for {}", row.email))?;
+        let credentials = match oauth::provider_for_auth_type(&row.auth_type) {
+            Some(provider) => oauth_credential_provider(provider, row.email.clone())?,
+            None => {
+                let secret = keystore::get_account_secret(&row.email)?
+                    .ok_or_else(|| anyhow!("no stored password for {}", row.email))?;
+                static_credential(Credential::Password(secret))
+            }
+        };
         let (host, port) = split_host_port(&row.imap_host, 993);
         let (rules, folder_states) = {
             let s = self.store.borrow();
@@ -667,7 +685,7 @@ impl App {
             AccountConfig {
                 account_id: row.id,
                 settings: ImapSettings { host, port, username: row.email.clone() },
-                credentials: static_credential(Credential::Password(secret)),
+                credentials,
                 rules,
                 folder_states,
                 sync_window_days: SYNC_WINDOW_DAYS,
@@ -699,35 +717,58 @@ impl App {
     }
 
     fn add_account(&mut self, email: &str, password: &str, imap_host: &str, port: &str, smtp_host: &str) {
+        let secret = AddSecret::Password(Zeroizing::new(password.to_string()));
+        self.start_add(email, imap_host, port, smtp_host, secret);
+    }
+
+    fn sign_in(&mut self, provider: &'static OAuthProvider, email: &str, imap_host: &str, port: &str, smtp_host: &str) {
+        self.start_add(email, imap_host, port, smtp_host, AddSecret::OAuth(provider));
+    }
+
+    fn start_add(&mut self, email: &str, imap_host: &str, port: &str, smtp_host: &str, secret: AddSecret) {
         let Some(ui) = self.ui() else { return };
-        match self.prepare_add_account(email, password, imap_host, port, smtp_host) {
+        if self.pending_add.is_some() {
+            ui.set_add_account_error("Another sign-in is still in progress".into());
+            return;
+        }
+        let progress = match secret {
+            AddSecret::Password(_) => "Checking the login...",
+            AddSecret::OAuth(_) => "Waiting for sign-in in your browser...",
+        };
+        match self.prepare_add_account(email, imap_host, port, smtp_host, secret) {
             Ok(pending) => {
-                ui.set_add_account_error("Checking the login...".into());
+                ui.set_add_account_error(progress.into());
                 self.check_login(pending);
             }
             Err(e) => ui.set_add_account_error(format!("{e:#}").into()),
         }
     }
 
-    /// Tests the IMAP login on a background task. The account is saved only if the test passes.
+    /// Tests the login on a background task. The account is saved only if the test passes.
     fn check_login(&mut self, pending: PendingAdd) {
         let settings = ImapSettings {
             host: pending.imap_host.clone(),
             port: pending.port,
             username: pending.email.clone(),
         };
-        let credential = Credential::Password(pending.password.clone());
         let email = pending.email.clone();
+        let oauth_provider = match &pending.secret {
+            AddSecret::OAuth(provider) => Some(*provider),
+            AddSecret::Password(_) => None,
+        };
+        let password = match &pending.secret {
+            AddSecret::Password(p) => Some(p.clone()),
+            AddSecret::OAuth(_) => None,
+        };
         self.pending_add = Some(pending);
         let tx = self.ui_tx.clone();
         self.rt.spawn(async move {
-            let error = match mailthin_net::imap::connect(&settings, &credential).await {
-                Ok(mut session) => {
-                    let _ = session.logout().await;
-                    None
-                }
-                Err(e) => Some(format!("{e:#}")),
+            let result = match (oauth_provider, password) {
+                (Some(provider), _) => oauth_sign_in(provider, &email, &settings).await,
+                (None, Some(password)) => test_imap_login(&settings, &Credential::Password(password)).await,
+                (None, None) => Err(anyhow!("no credentials to test")),
             };
+            let error = result.err().map(|e| format!("{e:#}"));
             let _ = tx.send(UiMsg::LoginChecked { email, error });
         });
     }
@@ -754,12 +795,19 @@ impl App {
         }
     }
 
-    fn prepare_add_account(&self, email: &str, password: &str, imap_host: &str, port: &str, smtp_host: &str) -> Result<PendingAdd> {
+    fn prepare_add_account(
+        &self,
+        email: &str,
+        imap_host: &str,
+        port: &str,
+        smtp_host: &str,
+        secret: AddSecret,
+    ) -> Result<PendingAdd> {
         let email = email.trim();
         if !looks_like_email(email) {
             return Err(anyhow!("Enter a valid email address"));
         }
-        if password.is_empty() {
+        if matches!(&secret, AddSecret::Password(p) if p.is_empty()) {
             return Err(anyhow!("Enter the account's app password"));
         }
         let defaults = provider_defaults(email).ok_or_else(|| anyhow!("Cannot guess the mail servers"))?;
@@ -780,7 +828,7 @@ impl App {
         }
         Ok(PendingAdd {
             email: email.into(),
-            password: Zeroizing::new(password.to_string()),
+            secret,
             imap_host: host,
             port,
             smtp_host: smtp,
@@ -788,15 +836,23 @@ impl App {
     }
 
     fn save_account(&mut self, pending: PendingAdd) -> Result<()> {
-        let PendingAdd { email, password, imap_host, port, smtp_host } = pending;
-        keystore::set_account_secret(&email, password.as_str()).context("cannot save the password to the OS keyring")?;
+        let PendingAdd { email, secret, imap_host, port, smtp_host } = pending;
+        let auth_type = match &secret {
+            AddSecret::Password(password) => {
+                keystore::set_account_secret(&email, password.as_str())
+                    .context("cannot save the password to the OS keyring")?;
+                "password".to_string()
+            }
+            // The refresh token was stored by the sign-in task once the login test passed.
+            AddSecret::OAuth(provider) => provider.auth_type(),
+        };
         let stored_host = if port == 993 { imap_host } else { format!("{imap_host}:{port}") };
         let id = match self.store.borrow().add_account(&NewAccount {
             kind: "imap",
             email: &email,
             imap_host: &stored_host,
             smtp_host: &smtp_host,
-            auth_type: "password",
+            auth_type: &auth_type,
         }) {
             Ok(id) => id,
             Err(e) => {
@@ -810,7 +866,7 @@ impl App {
             email,
             imap_host: stored_host,
             smtp_host,
-            auth_type: "password".into(),
+            auth_type,
         };
         self.start_account(&row)
     }
@@ -942,6 +998,47 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Builds a credential source that exchanges the stored refresh token for a fresh access token on
+/// every connection. A rotated refresh token returned by the provider replaces the stored one.
+fn oauth_credential_provider(provider: &'static OAuthProvider, email: String) -> Result<CredentialProvider> {
+    let config = provider.client_config_from_env()?;
+    Ok(Arc::new(move || -> BoxFuture<'static, Result<Credential>> {
+        let config = config.clone();
+        let email = email.clone();
+        Box::pin(async move {
+            let refresh = keystore::get_account_secret(&email)?
+                .ok_or_else(|| anyhow!("no stored sign-in for {email}; add the account again"))?;
+            let tokens = oauth::refresh_access_token(provider, &config, &refresh).await?;
+            if let Some(rotated) = &tokens.refresh_token {
+                keystore::set_account_secret(&email, rotated.as_str())?;
+            }
+            Ok(Credential::OAuth2AccessToken(tokens.access_token))
+        })
+    }))
+}
+
+/// Runs the browser sign-in, tests the IMAP login with the new access token, and stores the
+/// refresh token only after that test passes.
+async fn oauth_sign_in(provider: &'static OAuthProvider, email: &str, settings: &ImapSettings) -> Result<()> {
+    let config = provider.client_config_from_env()?;
+    let pending = oauth::begin_authorization(provider, &config)?;
+    open::that_detached(pending.auth_url.as_str()).context("cannot open the browser for sign-in")?;
+    let tokens = pending.complete(OAUTH_SIGN_IN_TIMEOUT).await?;
+    let refresh = tokens
+        .refresh_token
+        .as_ref()
+        .ok_or_else(|| anyhow!("{} did not issue a refresh token; try signing in again", provider.name))?;
+    test_imap_login(settings, &Credential::OAuth2AccessToken(tokens.access_token.clone())).await?;
+    keystore::set_account_secret(email, refresh.as_str()).context("cannot save the sign-in to the OS keyring")?;
+    Ok(())
+}
+
+async fn test_imap_login(settings: &ImapSettings, credential: &Credential) -> Result<()> {
+    let mut session = mailthin_net::imap::connect(settings, credential).await?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
 fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     macro_rules! on {
         ($setter:ident, |$app:ident $(, $arg:ident)*| $body:expr) => {{
@@ -969,5 +1066,11 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     on!(on_email_edited, |app, email| app.fill_server_defaults(email.as_str()));
     on!(on_add_account, |app, email, password, host, port, smtp| {
         app.add_account(&email, &password, &host, &port, &smtp)
+    });
+    on!(on_sign_in_google, |app, email, host, port, smtp| {
+        app.sign_in(&oauth::GMAIL, &email, &host, &port, &smtp)
+    });
+    on!(on_sign_in_microsoft, |app, email, host, port, smtp| {
+        app.sign_in(&oauth::OUTLOOK, &email, &host, &port, &smtp)
     });
 }

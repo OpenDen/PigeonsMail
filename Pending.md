@@ -11,20 +11,20 @@ Compose window: To/Cc, subject, body, attachment picker, Send button, and the c 
 Reply, Reply all, Forward: pre-filled from the open message. The Reply button and r shortcut are disabled placeholders now.
 Attachments: the reader lists them, but you can't open or save them yet. Planned as encrypted storage or save-to-disk.
 Rules screen: the rules engine works, but rules can only be added through code today. Needs the builder UI and the "test against last 50 mails" preview.
-3. OAuth (Gmail and Outlook)
-
-The sign-in code itself is written and tested: browser flow, PKCE, token refresh.
-It isn't connected to the UI. Still missing:
-a "Sign in with Google/Microsoft" button
-your own client IDs from Google and Microsoft (none are embedded)
-storing the refresh token in the keyring
-refreshing the access token on reconnect
-Microsoft has largely turned off app-password IMAP for Outlook.com and Microsoft 365, so Outlook accounts will need this.
+3. OAuth (Gmail and Outlook): built and wired to the Add Account dialog.
+   * "Sign in with Google" and "Sign in with Microsoft" open the browser, sign in with PKCE and a
+     loopback redirect, and test the IMAP login before saving. The refresh token goes to the
+     keyring; access tokens are refreshed on each reconnect.
+   * Still needed: real client IDs (environment variables, see DEVELOPMENT.md section 8.6) and a
+     live test. Google requires app verification before general release; until then only test users
+     can sign in.
+   * Microsoft has largely turned off app-password IMAP for Outlook.com and Microsoft 365, so Outlook
+     accounts depend on this path.
 4. Smaller Phase 1 gaps
 
 Changes made on the server from another device (read, starred, deleted) don't update messages already synced.
 IDLE only watches the Inbox.
-No UI for labels, removing an account, or editing server settings.
+* No UI for labels or editing server settings after an account is added. Accounts can be removed.
 No dedicated "Starred" folder. Starring only works as a filter.
 5. Release readiness
 

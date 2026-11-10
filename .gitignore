@@ -3,3 +3,5 @@
 *.db-wal
 *.db-shm
 .env
+# Build-time OAuth client secrets (never commit)
+crates/net/oauth-secrets/

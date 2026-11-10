@@ -24,10 +24,18 @@ pub struct OAuthProvider {
     pub loopback_host: &'static str,
     pub imap_host: &'static str,
     pub smtp_host: &'static str,
+    /// Environment variable holding the registered client ID (see DEVELOPMENT.md).
+    pub client_id_env: &'static str,
+    /// Public client ID built into the app. The environment variable overrides it.
+    pub default_client_id: Option<&'static str>,
+    /// Client secret built into the app at compile time, if one was supplied. The environment variable overrides it.
+    pub default_client_secret: Option<&'static str>,
+    /// Environment variable holding the client secret, for providers whose desktop clients use one.
+    pub client_secret_env: Option<&'static str>,
     extra_auth_params: &'static [(&'static str, &'static str)],
 }
 
-pub const GMAIL: OAuthProvider = OAuthProvider {
+pub static GMAIL: OAuthProvider = OAuthProvider {
     name: "gmail",
     auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
@@ -35,10 +43,17 @@ pub const GMAIL: OAuthProvider = OAuthProvider {
     loopback_host: "127.0.0.1",
     imap_host: "imap.gmail.com",
     smtp_host: "smtp.gmail.com",
+    client_id_env: "MAILTHIN_GOOGLE_CLIENT_ID",
+    default_client_id: Some("456159786850-ep4ps88vqb7rbkhkcv1ukr31h443ofif.apps.googleusercontent.com"),
+    default_client_secret: match option_env!("MAILTHIN_BUILTIN_GOOGLE_CLIENT_SECRET") {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => None,
+    },
+    client_secret_env: Some("MAILTHIN_GOOGLE_CLIENT_SECRET"),
     extra_auth_params: &[("access_type", "offline"), ("prompt", "consent")],
 };
 
-pub const OUTLOOK: OAuthProvider = OAuthProvider {
+pub static OUTLOOK: OAuthProvider = OAuthProvider {
     name: "outlook",
     auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
@@ -50,8 +65,48 @@ pub const OUTLOOK: OAuthProvider = OAuthProvider {
     loopback_host: "localhost",
     imap_host: "outlook.office365.com",
     smtp_host: "smtp.office365.com",
+    client_id_env: "MAILTHIN_MICROSOFT_CLIENT_ID",
+    default_client_id: None,
+    default_client_secret: None,
+    client_secret_env: None,
     extra_auth_params: &[],
 };
+
+/// Looks up a provider by the name stored in the account's `auth_type` (`oauth:<name>`).
+pub fn provider_for_auth_type(auth_type: &str) -> Option<&'static OAuthProvider> {
+    match auth_type.strip_prefix("oauth:")? {
+        "gmail" => Some(&GMAIL),
+        "outlook" => Some(&OUTLOOK),
+        _ => None,
+    }
+}
+
+impl OAuthProvider {
+    /// The `auth_type` value stored with accounts that sign in through this provider.
+    pub fn auth_type(&self) -> String {
+        format!("oauth:{}", self.name)
+    }
+
+    /// Reads the client registration from the environment. Missing values are reported by name.
+    pub fn client_config_from_env(&self) -> Result<OAuthClientConfig> {
+        let client_id = std::env::var(self.client_id_env)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| self.default_client_id.map(str::to_owned))
+            .ok_or_else(|| anyhow!("set {} to sign in with {}", self.client_id_env, self.name))?;
+        let client_secret = match self.client_secret_env {
+            Some(var) => Some(
+                std::env::var(var)
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| self.default_client_secret.map(str::to_owned))
+                    .ok_or_else(|| anyhow!("sign-in with {} is not configured in this build", self.name))?,
+            ),
+            None => None,
+        };
+        Ok(OAuthClientConfig { client_id, client_secret })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OAuthClientConfig {
@@ -238,6 +293,13 @@ fn wait_for_code(server: &tiny_http::Server, expected_state: &str, timeout: Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_type_maps_back_to_provider() {
+        assert_eq!(provider_for_auth_type(&GMAIL.auth_type()).map(|p| p.name), Some("gmail"));
+        assert_eq!(provider_for_auth_type(&OUTLOOK.auth_type()).map(|p| p.name), Some("outlook"));
+        assert!(provider_for_auth_type("password").is_none());
+    }
 
     #[test]
     fn xoauth2_format() {

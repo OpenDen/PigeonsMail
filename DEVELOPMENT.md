@@ -39,7 +39,7 @@ build, run and test the app.
 | Body cache with LRU eviction | Done | 300 bodies kept; oldest evicted |
 | Account secrets in OS keyring | Done | Windows Credential Manager |
 | IMAP login (app password) | Done, untested on a live server | TLS (port 993) via rustls |
-| IMAP login (OAuth2 XOAUTH2) | Library done, **not wired to UI** | Gmail and Outlook loopback + PKCE flow |
+| IMAP login (OAuth2 XOAUTH2) | Wired to the Add Account dialog; **not tested against live providers** | Gmail and Outlook loopback + PKCE flow; needs client IDs (section 8.6) |
 | Multi-account sync (one Tokio task per account) | Done, untested on a live server | Folder list, 30-day header window, incremental UID sync, UIDVALIDITY handling |
 | IMAP IDLE with polling fallback | Done, untested on a live server | IDLE watches INBOX only |
 | Rules engine | Done | Priority ordered; runs on every newly fetched message |
@@ -319,13 +319,13 @@ The work followed the plan's order (1A → 1B → 1C) in three working sessions.
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace` | **60 passed**, 0 failed, 1 ignored (keyring test, run separately) |
+| `cargo test --workspace` | **62 passed**, 0 failed, 1 ignored (keyring test, run separately) |
 | Keyring round-trip test (`-- --ignored`) | Passed against the real Windows credential store |
 | App launches, opens window, creates encrypted DB | Verified (about 57 MB working set, empty, debug build) |
 | HTML render, table, links, safe-link filter, remote-image blocking | Verified by offline render and tests |
 | Opening/clicking/scrolling in the live window | **Not verified** (see Session 3 note) |
 | IMAP connect, sync, IDLE, fetch, flags, move, expunge against a real server | **Not verified** |
-| OAuth flow against Google/Microsoft | **Not verified** (no client IDs available; also not wired to UI) |
+| OAuth flow against Google/Microsoft | **Not verified** (no client IDs available yet; code is wired to the Add Account dialog) |
 | Release build | **Not built** |
 | Memory targets (under 120 MB idle / 150 MB active) | **Not measured**; no claim is made |
 | 3 accounts syncing concurrently | **Not tested** |
@@ -348,10 +348,10 @@ The work followed the plan's order (1A → 1B → 1C) in three working sessions.
 
 * **Real-server testing** of everything in `net` (highest priority). Start with an app-password
   IMAP account on a throwaway mailbox.
-* **OAuth in the UI:** a "Sign in with Google/Microsoft" button, client ID configuration, and a
-  `CredentialProvider` that refreshes access tokens and stores the refresh token in the keyring.
-  Microsoft has largely disabled basic-auth IMAP for Outlook.com / Microsoft 365, so Outlook
-  accounts need this.
+* **OAuth verification:** the sign-in buttons, token refresh and keyring storage are implemented
+  but still need a live test with real client IDs. Google requires app verification before
+  general release (until then only listed test users can sign in). Microsoft has largely disabled
+  basic-auth IMAP for Outlook.com / Microsoft 365, so Outlook accounts depend on this path.
 * **Server-side changes are not picked up:** flags changed or messages deleted elsewhere are not
   reflected for already-synced messages (needs `CONDSTORE`/`UID FETCH 1:* FLAGS` reconciliation and
   expunge detection).
@@ -427,8 +427,9 @@ On first launch the app creates the encrypted database and a key in the Windows 
 and shows an empty window. To try it with a real mailbox:
 
 1. Click **Add Account**.
-2. Enter your email address and an **app password** (not your normal password):
-   * Gmail: turn on 2-step verification, create an app password, and make sure IMAP is enabled.
+2. Enter your email address. For Gmail or Outlook, click **Sign in with Google** or **Sign in with
+   Microsoft**; your browser opens and no password is stored. For other providers, enter an
+   **app password** (not your normal password):
    * Other providers: use the provider's app-password or IMAP password feature.
 3. Leave the server fields blank to guess them from the address (for example `imap.gmail.com`), or
    enter them; use `host` and a port field (default 993, implicit TLS only).
@@ -450,7 +451,7 @@ cargo run -p mailthin-app
 ```powershell
 . .\scripts\dev-env.ps1
 
-cargo test --workspace                       # all unit tests (60)
+cargo test --workspace                       # all unit tests (62)
 cargo test -p mailthin-store -- --ignored    # real OS keyring round-trip (writes and removes one entry)
 
 # A single crate
@@ -466,6 +467,35 @@ cargo check --workspace
 
 ---
 
+### 8.6 OAuth client setup (Gmail and Outlook sign-in)
+
+Google sign-in works in a build when the client ID and secret are supplied at build time:
+
+* The Google client ID is built into the app (it is public).
+* The Google client secret is read at build time from the git-ignored file
+  `crates/net/oauth-secrets/google-client-secret.txt`. The file is never committed. Release builds
+  must have this file in place, or have it written from the release pipeline's secret store.
+* The environment variable `MAILTHIN_GOOGLE_CLIENT_SECRET` overrides the built-in secret at run time.
+
+| Setting | Source | Used for |
+| --- | --- | --- |
+| Google client ID | Built in | Sign in with Google |
+| Google client secret | `crates/net/oauth-secrets/google-client-secret.txt` at build time, or `MAILTHIN_GOOGLE_CLIENT_SECRET` at run time | Sign in with Google (Google's desktop client type expects it) |
+| Microsoft client ID | Not built in yet; `MAILTHIN_MICROSOFT_CLIENT_ID` overrides it | Sign in with Microsoft |
+
+Create a Google OAuth client of type **Desktop app** with the Gmail API scope
+`https://mail.google.com/`. Create a Microsoft Entra app registration as a public client with the
+mobile/desktop redirect `http://localhost` and the delegated permissions `IMAP.AccessAsUser.All`,
+`SMTP.Send` and `offline_access`. Both providers use a random loopback port.
+
+Google apps in testing mode accept only the test users listed on the OAuth consent screen. Sign-in
+for any other account needs Google's app verification, which includes a security assessment for the
+restricted Gmail scope.
+
+
+
+---
+
 ## 9. Where data and secrets live
 
 | Item | Location |
@@ -477,7 +507,8 @@ cargo check --workspace
 
 **Important:** if the database key is deleted from the Credential Manager, the database can no longer
 be opened. If you delete the database file but keep the key, the app simply creates a new database.
-Nothing secret is committed to the repository; there are no embedded OAuth client IDs.
+Nothing secret is committed to the repository. The Google client ID is built in (public). The Google
+client secret is built in from the git-ignored `crates/net/oauth-secrets/` folder (section 8.6).
 
 OAuth scopes requested (only what IMAP/SMTP needs): Gmail `https://mail.google.com/`; Outlook
 `IMAP.AccessAsUser.All`, `SMTP.Send`, `offline_access`.
@@ -494,7 +525,9 @@ OAuth scopes requested (only what IMAP/SMTP needs): Gmail `https://mail.google.c
 | `An Application Control policy has blocked this file (os error 4551)` | Windows policy blocked a freshly built executable. Re-run the command; if it persists, the folder may need an allow rule. Test code runs from library targets for this reason |
 | Window text input looks dark/unreadable | The UI forces the light colour scheme; make sure you are on the current build |
 | Status bar says `no stored password for <email>` | The account row exists but its keyring entry is missing (for example created by a script). Remove the account row or re-add the account |
-| Login fails | Use an app password, confirm IMAP is enabled on the mailbox, and check host and port |
+| Login fails | The dialog shows the server's reason. Use an app password (not your normal password) for password sign-in, confirm IMAP is enabled, and check host and port |
+| `Login failed: ... is not configured in this build` | The Google secret was not supplied at build time (section 8.6) |
+| `Sign-in timed out` or the browser shows a redirect error | Complete the browser sign-in within 5 minutes; check that the provider's OAuth client allows a loopback redirect |
 | Messages appear but body never loads | Check the status bar for a server error; large messages over 40 MB are refused by design |
 | Remote images stay blocked | Click **Load remote images**; images over 5 MB, non-HTTPS, or on private addresses are refused by design |
 

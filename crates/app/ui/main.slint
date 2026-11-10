@@ -148,6 +148,8 @@ export component MainWindow inherits Window {
     in-out property <bool> show-add-account: false;
     in property <string> add-account-error;
     callback add-account(string, string, string, string, string);
+    callback sign-in-google(string, string, string, string);
+    callback sign-in-microsoft(string, string, string, string);
     callback email-edited(string);
 
     in-out property <bool> show-remove-account: false;
@@ -623,7 +625,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             width: 420px;
-            height: 440px;
+            height: 540px;
             border-radius: 14px;
             background: Theme.surface;
 
@@ -633,7 +635,7 @@ export component MainWindow inherits Window {
 
                 Text { text: "Add mail account"; font-size: 18px; font-weight: 700; color: Theme.text; }
                 Text {
-                    text: "IMAP with an app password. Passwords are kept in the OS keyring.";
+                    text: "Sign in with your provider (recommended), or use an app password for IMAP. Passwords are kept in the OS keyring.";
                     font-size: 12px;
                     color: Theme.text-dim;
                     wrap: word-wrap;
@@ -644,7 +646,22 @@ export component MainWindow inherits Window {
                     placeholder-text: "you@example.com";
                     edited => { root.email-edited(self.text); }
                 }
-                Text { text: "App password"; font-size: 12px; color: Theme.text-dim; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ToolButton {
+                        text: "Sign in with Google";
+                        clicked => {
+                            root.sign-in-google(root.acc-email, root.acc-imap-host, root.acc-imap-port, root.acc-smtp-host);
+                        }
+                    }
+                    ToolButton {
+                        text: "Sign in with Microsoft";
+                        clicked => {
+                            root.sign-in-microsoft(root.acc-email, root.acc-imap-host, root.acc-imap-port, root.acc-smtp-host);
+                        }
+                    }
+                }
+                Text { text: "App password (for other providers)"; font-size: 12px; color: Theme.text-dim; }
                 LineEdit { text <=> root.acc-password; input-type: password; }
                 Text { text: "IMAP server (blank = guess from address)"; font-size: 12px; color: Theme.text-dim; }
                 HorizontalLayout {

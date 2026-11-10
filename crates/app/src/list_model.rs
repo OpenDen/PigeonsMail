@@ -6,7 +6,7 @@ use std::rc::Rc;
 use mailthin_store::{MailStore, MessageQuery, MessageRow};
 use slint::{Model, ModelNotify, ModelTracker};
 
-use crate::format::{display_name, format_list_date};
+use crate::format::{date_group, display_name, format_list_date};
 use crate::MessageItem;
 
 pub const PAGE_SIZE: usize = 50;
@@ -128,6 +128,7 @@ pub fn to_item(r: &MessageRow, now_ts: i64) -> MessageItem {
         subject: if r.subject.is_empty() { "(no subject)".into() } else { r.subject.as_str().into() },
         snippet: r.snippet.as_str().into(),
         date: format_list_date(r.date_ts, now_ts).into(),
+        group: date_group(r.date_ts, now_ts).into(),
         unread: !r.is_read(),
         starred: r.is_starred(),
         has_attachment: r.has_attachment(),

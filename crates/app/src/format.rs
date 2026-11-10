@@ -41,6 +41,34 @@ pub fn format_full_date(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Date bucket shown as a header in the message list (local calendar days).
+pub fn date_group(ts: i64, now_ts: i64) -> &'static str {
+    date_group_in(&Local, ts, now_ts)
+}
+
+pub fn date_group_in<Tz: TimeZone>(tz: &Tz, ts: i64, now_ts: i64) -> &'static str
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let (Some(t), Some(now)) = (DateTime::from_timestamp(ts, 0), DateTime::from_timestamp(now_ts, 0)) else {
+        return "Older";
+    };
+    let days = now
+        .with_timezone(tz)
+        .date_naive()
+        .signed_duration_since(t.with_timezone(tz).date_naive())
+        .num_days();
+    match days {
+        d if d <= 0 => "Today",
+        1 => "Yesterday",
+        2..=7 => "Last week",
+        8..=30 => "Last month",
+        31..=90 => "Last 3 months",
+        91..=180 => "Last 6 months",
+        _ => "Older",
+    }
+}
+
 pub fn human_size(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
@@ -92,17 +120,33 @@ pub fn split_host_port(s: &str, default_port: u16) -> (String, u16) {
     }
 }
 
-/// Sidebar label for a folder.
+/// Sidebar label for a folder. Roles follow Gmail's own names (Spam, All Mail, Starred).
 pub fn folder_title(name: &str, role: Option<&str>) -> String {
     match role {
         Some("inbox") => "Inbox".into(),
         Some("sent") => "Sent".into(),
         Some("drafts") => "Drafts".into(),
-        Some("archive") => "Archive".into(),
+        Some("archive") => "All Mail".into(),
         Some("trash") => "Trash".into(),
-        Some("junk") => "Junk".into(),
+        Some("junk") => "Spam".into(),
         Some("starred") => "Starred".into(),
+        Some("important") => "Important".into(),
         _ => name.rsplit(['/', '.']).next().filter(|s| !s.is_empty()).unwrap_or(name).to_string(),
+    }
+}
+
+/// Name of the sidebar icon (see `MailIcon` in `widgets.slint`) for a folder role.
+pub fn folder_icon(role: Option<&str>) -> &'static str {
+    match role {
+        Some("inbox") => "tray",
+        Some("sent") => "send",
+        Some("drafts") => "doc",
+        Some("archive") => "archive",
+        Some("trash") => "trash",
+        Some("junk") => "warning",
+        Some("starred") => "star",
+        Some("important") => "tag",
+        _ => "folder",
     }
 }
 
@@ -124,6 +168,19 @@ pub fn looks_like_email(s: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn date_groups_follow_gmail_style_buckets() {
+        let now = 1_700_000_000; // 2023-11-14 22:13 UTC
+        let day = 86_400;
+        assert_eq!(date_group_in(&Utc, now - 60, now), "Today");
+        assert_eq!(date_group_in(&Utc, now - day, now), "Yesterday");
+        assert_eq!(date_group_in(&Utc, now - 5 * day, now), "Last week");
+        assert_eq!(date_group_in(&Utc, now - 20 * day, now), "Last month");
+        assert_eq!(date_group_in(&Utc, now - 60 * day, now), "Last 3 months");
+        assert_eq!(date_group_in(&Utc, now - 150 * day, now), "Last 6 months");
+        assert_eq!(date_group_in(&Utc, now - 400 * day, now), "Older");
+    }
 
     #[test]
     fn display_names() {

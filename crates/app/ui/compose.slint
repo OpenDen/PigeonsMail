@@ -18,7 +18,7 @@ export component ComposeDialog inherits Rectangle {
     in property <string> from-address;
     in property <string> error;
     in property <image> preview-image;
-    in-out property <bool> preview-mode: false;
+    in-out property <bool> preview-mode: true;
     in property <[ComposeAttachment]> attachments;
     // Selection to restore after the app rewrites the body. Each change of `select-serial`
     // applies the selection, so repeating the same range still takes effect.
@@ -53,7 +53,7 @@ export component ComposeDialog inherits Rectangle {
         HorizontalLayout {
             Text { text: "New message"; font-size: 15px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
             Rectangle { }
-            ToolButton { text: "×"; clicked => { root.discard(); } }
+            ToolButton { icon: "close"; tip: "Discard draft"; clicked => { root.discard(); } }
         }
         Text { text: "From " + root.from-address; font-size: 12px; color: Theme.text-dim; }
         NeuField { text <=> root.to; placeholder-text: "To"; }
@@ -61,17 +61,17 @@ export component ComposeDialog inherits Rectangle {
         NeuField { text <=> root.subject; placeholder-text: "Subject"; }
         HorizontalLayout {
             spacing: 4px;
-            ToolButton { text: "B"; clicked => { root.format("bold", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "I"; clicked => { root.format("italic", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "S"; clicked => { root.format("strike", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "<>"; clicked => { root.format("code", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "Link"; clicked => { root.format("link", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "Quote"; clicked => { root.format("quote", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "•"; clicked => { root.format("bullet", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
-            ToolButton { text: "1."; clicked => { root.format("numbered", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "B"; tip: "Bold"; clicked => { root.format("bold", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "I"; tip: "Italic"; clicked => { root.format("italic", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "S"; tip: "Strikethrough"; clicked => { root.format("strike", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "<>"; tip: "Inline code"; clicked => { root.format("code", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "Link"; tip: "Insert link"; clicked => { root.format("link", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "Quote"; tip: "Block quote"; clicked => { root.format("quote", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "•"; tip: "Bulleted list"; clicked => { root.format("bullet", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "1."; tip: "Numbered list"; clicked => { root.format("numbered", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
             Rectangle { }
             ToolButton {
-                text: root.preview-mode ? "Edit" : "Preview";
+                text: root.preview-mode ? "Edit source" : "Preview";
                 clicked => {
                     root.preview-mode = !root.preview-mode;
                     if root.preview-mode { root.preview(); }
@@ -121,8 +121,8 @@ export component ComposeDialog inherits Rectangle {
         }
         HorizontalLayout {
             spacing: 8px;
-            ToolButton { text: "Send"; primary: true; clicked => { root.send(); } }
-            ToolButton { text: "Attach"; clicked => { root.add-attachment(); } }
+            ToolButton { text: "Send"; primary: true; tip: "Send message"; clicked => { root.send(); } }
+            ToolButton { icon: "attach"; text: "Attach"; tip: "Attach files"; clicked => { root.add-attachment(); } }
             Rectangle { }
         }
     }

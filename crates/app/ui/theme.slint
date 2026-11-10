@@ -6,15 +6,17 @@ export global Theme {
     // 0 = cyan, 1 = violet, 2 = magenta, 3 = green
     in-out property <int> accent-index: 0;
 
-    out property <color> background: dark ? #1b1f2b : #e6e9ef;
-    out property <color> surface: dark ? #1b1f2b : #e6e9ef;
-    out property <color> well: dark ? #141821 : #d6dbe4;
-    out property <color> paper: dark ? #232938 : #ffffff;
+    // Window base, raised cards, inset field fill and hairline borders.
+    out property <color> background: dark ? #0f131b : #f4f6fb;
+    out property <color> surface: dark ? #181d28 : #ffffff;
+    out property <color> well: dark ? #10141d : #f1f4f9;
+    out property <color> border: dark ? #2a3142 : #d5dce8;
+    out property <color> paper: dark ? #1d2330 : #ffffff;
     out property <color> shadow-light: dark ? #2b3246 : #ffffff;
-    out property <color> shadow-dark: dark ? #0b0e15 : #b9c1cf;
+    out property <color> shadow-dark: dark ? #05070b : #cfd6e3;
     out property <color> scrim: #0b0e1599;
-    out property <color> text: dark ? #e8ecf4 : #1f2633;
-    out property <color> text-dim: dark ? #8d97aa : #5d6679;
+    out property <color> text: dark ? #e8ecf4 : #1a2130;
+    out property <color> text-dim: dark ? #8d97aa : #667085;
 
     out property <color> accent: accent-palette[accent-index];
     // Neon choices offered in the sidebar: cyan, violet, magenta, green.

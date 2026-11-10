@@ -1,6 +1,6 @@
 import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { AccentSwatch, NeuCard, NeuChip, NeuField, NeuSwitch, ToolButton } from "widgets.slint";
+import { AccentSwatch, MailIcon, NeuCard, NeuChip, NeuField, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -10,6 +10,7 @@ export struct MessageItem {
     subject: string,
     snippet: string,
     date: string,
+    group: string,
     unread: bool,
     starred: bool,
     has-attachment: bool,
@@ -22,6 +23,8 @@ export struct SidebarItem {
     unread: int,
     folder-id: int,
     account-id: int,
+    expanded: bool,
+    icon: string,
 }
 
 export struct AttachmentChip {
@@ -42,6 +45,7 @@ export component MainWindow inherits Window {
     in property <[SidebarItem]> sidebar;
     in-out property <int> selected-folder: -1;
     callback select-folder(int);
+    callback toggle-account(int);
 
     // Message list
     in property <[MessageItem]> messages;
@@ -135,7 +139,9 @@ export component MainWindow inherits Window {
     in-out property <string> label-name;
     in-out property <string> manage-imap-host;
     in-out property <string> manage-smtp-host;
-    callback manage-next-account();
+    in property <[string]> manage-accounts;
+    in property <int> manage-account-index: -1;
+    callback manage-select-account(int);
     callback select-rule(int);
     callback save-rule();
     callback delete-rule();
@@ -175,6 +181,10 @@ export component MainWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
+            if (root.show-manage && event.text == Key.Escape) {
+                root.close-manage();
+                return accept;
+            }
             if (root.show-add-account || root.show-remove-account || root.show-compose || root.show-manage) {
                 return reject;
             }
@@ -196,6 +206,46 @@ export component MainWindow inherits Window {
         }
 
         VerticalLayout {
+            // ---------------- Top bar ----------------
+            NeuCard {
+                height: 48px;
+                border-radius: 0px;
+                drop-shadow-blur: 0px;
+                drop-shadow-offset-x: 0px;
+                drop-shadow-offset-y: 0px;
+
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        Image {
+                            source: @image-url("../../../Assets/PigeonMail.png");
+                            width: 26px;
+                            height: 26px;
+                            image-fit: contain;
+                        }
+                        Text {
+                            text: "PigeonMail";
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        TitleIconButton { icon: "compose"; tip: "New message (c)"; clicked => { root.compose-new(); } }
+                        TitleIconButton { icon: "settings"; tip: "Manage rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
+                        TitleIconButton { icon: "theme"; tip: "Switch light / dark theme"; clicked => { Theme.dark = !Theme.dark; Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; } }
+                        TitleIconButton { icon: "sync"; tip: "Sync now"; clicked => { root.refresh(); } }
+                        TitleIconButton { icon: "layout"; tip: "Calendar (Phase 2)"; enabled: false; }
+                    }
+                }
+
+            }
+
             HorizontalLayout {
                 spacing: 10px;
                 padding: 10px;
@@ -208,30 +258,45 @@ export component MainWindow inherits Window {
                         padding: 10px;
                         spacing: 8px;
 
-                        Text {
-                            text: "PigeonMail";
-                            font-size: 20px;
-                            font-weight: 700;
-                            color: Theme.accent;
-                        }
-
                         ListView {
                             for item in root.sidebar: Rectangle {
+                                width: 188px;
                                 height: 34px;
                                 border-radius: 10px;
                                 background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
-                                border-width: item.kind != 1 && root.selected-folder == item.folder-id ? 1px : 0px;
-                                border-color: Theme.accent.transparentize(0.4);
+                                border-width: item.kind != 1 && root.selected-folder == item.folder-id ? 1.5px : 0px;
+                                border-color: Theme.accent;
+
+                                // Right-click on an account row asks to remove it.
+                                if item.kind == 1: TouchArea {
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                            root.remove-account-id = item.account-id;
+                                            root.remove-account-email = item.title;
+                                            root.show-remove-account = true;
+                                        }
+                                    }
+                                }
 
                                 HorizontalLayout {
                                     padding-left: (item.kind == 2 || item.kind == 3) ? 18px : 8px;
                                     padding-right: 8px;
                                     spacing: 6px;
+                                    Rectangle {
+                                        width: 15px;
+                                        MailIcon {
+                                            name: item.icon;
+                                            width: 15px;
+                                            height: 15px;
+                                            y: (parent.height - self.height) / 2;
+                                            tint: root.selected-folder == item.folder-id && item.kind != 1 ? Theme.accent : Theme.text-dim;
+                                        }
+                                    }
                                     Text {
                                         text: item.title;
-                                        font-size: item.kind == 1 ? 11px : 13px;
-                                        font-weight: item.kind == 0 ? 700 : 400;
-                                        color: item.kind == 1 ? Theme.text-dim : (root.selected-folder == item.folder-id ? Theme.accent : Theme.text);
+                                        font-size: item.kind == 1 ? 14px : 13px;
+                                        font-weight: (item.kind == 0 || item.kind == 1) ? 700 : 400;
+                                        color: item.kind == 1 ? Theme.text : (root.selected-folder == item.folder-id ? Theme.accent : Theme.text);
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
@@ -243,20 +308,20 @@ export component MainWindow inherits Window {
                                         horizontal-alignment: right;
                                     }
                                     if item.kind == 1: Rectangle {
-                                        width: 56px;
-                                        Text {
-                                        text: "⋯";
-                                        font-size: 14px;
-                                        color: Theme.text-dim;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: center;
+                                        width: 24px;
+                                        height: 24px;
+                                        border-radius: 12px;
+                                        background: chevron-area.has-hover ? Theme.well : transparent;
+                                        MailIcon {
+                                            name: item.expanded ? "chevron-down" : "chevron-right";
+                                            width: 14px;
+                                            height: 14px;
+                                            x: 5px;
+                                            y: 5px;
+                                            tint: Theme.text-dim;
                                         }
-                                        TouchArea {
-                                            clicked => {
-                                                root.remove-account-id = item.account-id;
-                                                root.remove-account-email = item.title;
-                                                root.show-remove-account = true;
-                                            }
+                                        chevron-area := TouchArea {
+                                            clicked => { root.toggle-account(item.account-id); }
                                         }
                                     }
                                 }
@@ -291,14 +356,16 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            ToolButton { text: "Refresh"; clicked => { root.refresh(); } }
-                            ToolButton { text: "Compose (c)"; primary: true; clicked => { root.compose-new(); } }
-                            ToolButton { text: "Manage"; clicked => { root.manage-open(); } }
+                            ToolButton { text: "Refresh"; icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
+                            ToolButton { text: "Compose"; icon: "compose"; tip: "New message (c)"; primary: true; clicked => { root.compose-new(); } }
+                            ToolButton { text: "Manage"; icon: "settings"; tip: "Rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
                             ToolButton {
                                 text: "Add Account";
+                                icon: "plus";
+                                tip: "Connect another mail account";
                                 clicked => { root.show-add-account = true; }
                             }
-                            ToolButton { text: "Calendar"; enabled: false; }
+                            ToolButton { text: "Calendar"; icon: "layout"; tip: "Calendar arrives in Phase 2"; enabled: false; }
                         }
                     }
                 }
@@ -338,10 +405,32 @@ export component MainWindow inherits Window {
                         }
 
                         ListView {
-                            for m in root.messages: Rectangle {
+                            for m[i] in root.messages: VerticalLayout {
+                                width: 288px;
+                                spacing: 4px;
+                                if i == 0 || root.messages[Math.max(i - 1, 0)].group != m.group: Text {
+                                    text: m.group;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: Theme.accent;
+                                    height: 22px;
+                                    vertical-alignment: bottom;
+                                }
+                                Rectangle {
                                 height: 72px;
                                 border-radius: 10px;
+                                // Full outline per row, disabled in favour of the top rule below.
+                                // border-width: 1px;
+                                // border-color: Theme.border;
                                 background: root.selected-message == m.id ? Theme.well : transparent;
+
+                                Rectangle {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: parent.width;
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
 
                                 if root.selected-message == m.id: Rectangle {
                                     x: 0px;
@@ -377,18 +466,16 @@ export component MainWindow inherits Window {
                                             y: 3px;
                                             border-radius: 8px;
                                             background: Theme.well;
-                                            Text {
-                                                text: "att";
-                                                font-size: 10px;
-                                                color: Theme.text-dim;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
+                                            MailIcon {
+                                                tint: Theme.text-dim;
                                             }
                                         }
-                                        if m.starred: Text {
-                                            text: "★";
-                                            font-size: 13px;
-                                            color: Theme.star;
+                                        if m.starred: MailIcon {
+                                            name: "star";
+                                            width: 13px;
+                                            height: 13px;
+                                            y: 2px;
+                                            tint: Theme.star;
                                         }
                                         Text {
                                             text: m.date;
@@ -419,6 +506,7 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
+                            }
                         }
                     }
                 }
@@ -442,14 +530,16 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            ToolButton { text: "Reply (r)"; clicked => { root.reply-message(); } }
-                            ToolButton { text: "Reply all"; clicked => { root.reply-all-message(); } }
-                            ToolButton { text: "Forward (f)"; clicked => { root.forward-message(); } }
+                            ToolButton { text: "Reply"; icon: "reply"; tip: "Reply (r)"; clicked => { root.reply-message(); } }
+                            ToolButton { text: "Reply all"; icon: "reply"; tip: "Reply to everyone"; clicked => { root.reply-all-message(); } }
+                            ToolButton { text: "Forward"; icon: "forward"; tip: "Forward (f)"; clicked => { root.forward-message(); } }
                             Rectangle { width: 12px; }
-                            ToolButton { text: "Archive (e)"; clicked => { root.archive(); } }
-                            ToolButton { text: "Delete (#)"; clicked => { root.delete-message(); } }
+                            ToolButton { text: "Archive"; icon: "archive"; tip: "Archive (e)"; clicked => { root.archive(); } }
+                            ToolButton { text: "Delete"; icon: "trash"; tip: "Delete (#)"; clicked => { root.delete-message(); } }
                             ToolButton {
-                                text: root.msg-starred ? "Unstar (s)" : "Star (s)";
+                                text: root.msg-starred ? "Unstar" : "Star";
+                                icon: "star";
+                                tip: root.msg-starred ? "Remove star (s)" : "Star (s)";
                                 active: root.msg-starred;
                                 clicked => { root.star(); }
                             }
@@ -722,6 +812,8 @@ export component MainWindow inherits Window {
     // ---------------- Rules, labels and server settings ----------------
     if root.show-manage: ManageDialog {
         account-email: root.manage-account;
+        account-options: root.manage-accounts;
+        account-index: root.manage-account-index;
         error: root.manage-error;
         rules: root.manage-rules;
         labels: root.manage-labels;
@@ -738,7 +830,7 @@ export component MainWindow inherits Window {
         imap-host <=> root.manage-imap-host;
         smtp-host <=> root.manage-smtp-host;
         close => { root.close-manage(); keys.focus(); }
-        next-account => { root.manage-next-account(); }
+        select-account(index) => { root.manage-select-account(index); }
         select-rule(id) => { root.select-rule(id); }
         save-rule => { root.save-rule(); }
         delete-rule => { root.delete-rule(); }

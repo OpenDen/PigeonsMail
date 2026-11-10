@@ -5,11 +5,157 @@ export component NeuCard inherits Rectangle {
     background: Theme.surface;
     border-radius: Theme.radius-card;
     border-width: 1px;
-    border-color: Theme.shadow-light.transparentize(Theme.dark ? 0.2 : 0.0);
-    drop-shadow-blur: Theme.dark ? 18px : 14px;
-    drop-shadow-offset-x: 6px;
-    drop-shadow-offset-y: 6px;
-    drop-shadow-color: Theme.shadow-dark.transparentize(Theme.dark ? 0.1 : 0.35);
+    border-color: Theme.border;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-x: 3px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow-dark.transparentize(Theme.dark ? 0.1 : 0.5);
+}
+
+// Outline icons on a 24x24 grid, drawn as SVG-style paths (M, L, C, Z only) so they
+// render the same on every backend and need no image assets.
+export component MailIcon inherits Rectangle {
+    in property <string> name;
+    in property <color> tint: Theme.text;
+    width: 16px;
+    height: 16px;
+
+    pure function path-for(n: string) -> string {
+        if (n == "compose") { return "M4 20 L8.5 19 L19 8.5 L15.5 5 L5 15.5 Z M14 6.5 L17.5 10"; }
+        if (n == "settings") { return "M4 7 L20 7 M4 17 L20 17 M9 4 L9 10 M15 14 L15 20"; }
+        if (n == "theme") { return "M12 4 C16.4183 4 20 7.5817 20 12 C20 16.4183 16.4183 20 12 20 C7.5817 20 4 16.4183 4 12 C4 7.5817 7.5817 4 12 4 Z"; }
+        if (n == "sync") { return "M20 12 C20 16.4 16.4 20 12 20 C8.2 20 5 17.3 4.2 13.7 M4 12 C4 7.6 7.6 4 12 4 C15.8 4 19 6.7 19.8 10.3 M19.8 4.5 L19.8 10.3 L14 10.3 M4.2 19.5 L4.2 13.7 L10 13.7"; }
+        if (n == "layout") { return "M4 5 L20 5 L20 19 L4 19 Z M9 5 L9 19"; }
+        if (n == "reply") { return "M10 7 L4 12 L10 17 M4 12 L15 12 C18 12 20 14 20 18"; }
+        if (n == "forward") { return "M14 7 L20 12 L14 17 M20 12 L9 12 C6 12 4 14 4 18"; }
+        if (n == "archive") { return "M3 5 L21 5 L21 9 L3 9 Z M5 9 L5 20 L19 20 L19 9 M9 13 L15 13"; }
+        if (n == "trash") { return "M4 7 L20 7 M9 7 L9 4 L15 4 L15 7 M6 7 L7 20 L17 20 L18 7"; }
+        if (n == "star") { return "M12 3 L14.9 9 L21.5 9.8 L16.6 14.3 L17.9 20.8 L12 17.5 L6.1 20.8 L7.4 14.3 L2.5 9.8 L9.1 9 Z"; }
+        if (n == "tray") { return "M3 13 L6 5 L18 5 L21 13 L21 19 L3 19 Z M3 13 L8 13 L9 16 L15 16 L16 13 L21 13"; }
+        if (n == "send") { return "M3 11 L21 4 L14 20 L11 13 Z M11 13 L21 4"; }
+        if (n == "doc") { return "M6 3 L14 3 L19 8 L19 21 L6 21 Z M14 3 L14 8 L19 8 M9 13 L16 13 M9 17 L16 17"; }
+        if (n == "stack") { return "M3 8 L12 4 L21 8 L12 12 Z M3 12 L12 16 L21 12 M3 16 L12 20 L21 16"; }
+        if (n == "warning") { return "M12 4 L21 19 L3 19 Z M12 10 L12 14 M12 16 L12 17"; }
+        if (n == "tag") { return "M4 4 L12 4 L20 12 L12 20 L4 12 Z M8 8 L8 8.01"; }
+        if (n == "folder") { return "M3 6 L9 6 L11 8 L21 8 L21 19 L3 19 Z"; }
+        if (n == "mail") { return "M3 6 L21 6 L21 18 L3 18 Z M3 6 L12 13 L21 6"; }
+        if (n == "attach") { return "M15 7 L8.5 13.5 C7.5 14.5 7.5 16 8.5 17 C9.5 18 11 18 12 17 L18.5 10.5 C20.5 8.5 20.5 5.5 18.5 3.5 C16.5 1.5 13.5 1.5 11.5 3.5 L5 10 C2.5 12.5 2.5 16.5 5 19 C7.5 21.5 11.5 21.5 14 19 L20 13"; }
+        if (n == "chevron-down") { return "M6 9 L12 15 L18 9"; }
+        if (n == "chevron-right") { return "M9 6 L15 12 L9 18"; }
+        if (n == "close") { return "M6 6 L18 18 M18 6 L6 18"; }
+        if (n == "plus") { return "M12 5 L12 19 M5 12 L19 12"; }
+        if (n == "check") { return "M5 12.5 L10 17 L19 7"; }
+        return "";
+    }
+
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.path-for(root.name);
+        stroke: root.tint;
+        stroke-width: 1.6px;
+        fill: transparent;
+    }
+}
+
+// Hover tooltip. Shown as a popup window so it always draws above sibling controls and is
+// never clipped by its container. Position it relative to its host, like NeuSelect's popup.
+export component Tip inherits PopupWindow {
+    in property <string> text;
+    in property <bool> active;
+
+    close-policy: PopupClosePolicy.no-auto-close;
+    changed active => {
+        if (root.active && root.text != "") {
+            root.show();
+        } else {
+            root.close();
+        }
+    }
+
+    width: label.preferred-width + 16px;
+    height: 24px;
+
+    Rectangle {
+        background: Theme.surface;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        label := Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.text;
+            font-size: 11px;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// macOS-style close control: a red traffic-light dot that shows an x on hover.
+export component MacCloseButton inherits Rectangle {
+    in property <string> tip;
+    callback clicked;
+
+    width: 20px;
+    height: 20px;
+
+    dot := Rectangle {
+        width: 13px;
+        height: 13px;
+        border-radius: 6.5px;
+        background: area.pressed ? #c9463f : (area.has-hover ? #ff7b73 : #ff5f57);
+        border-width: 0.5px;
+        border-color: #e0443e;
+        MailIcon {
+            name: "close";
+            width: 7px;
+            height: 7px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: #5a0a06;
+            opacity: area.has-hover ? 1 : 0;
+        }
+    }
+    Tip { x: (root.width - self.width) / 2; y: root.height + 6px; text: root.tip; active: area.has-hover; }
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Mini icon button for the top bar. Glyph-based so it needs no image assets.
+export component TitleIconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tip;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked;
+
+    width: 34px;
+    height: 30px;
+    border-radius: 9px;
+    border-width: 1px;
+    background: (root.enabled && area.has-hover) ? Theme.well : transparent;
+    border-color: (root.enabled && area.has-hover) ? Theme.accent.transparentize(0.5) : transparent;
+
+    MailIcon {
+        name: root.icon;
+        width: 16px;
+        height: 16px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        tint: root.active ? Theme.accent : Theme.text;
+        opacity: root.enabled ? 1 : 0.35;
+    }
+    Tip { x: (root.width - self.width) / 2; y: root.height + 6px; text: root.tip; active: area.has-hover; }
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
 // Inset surface for selected rows and wells. Slint has no inset shadow, so a darker fill
@@ -28,43 +174,70 @@ export component ToolButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> active: false;
     in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <string> icon;
+    in property <string> tip;
     callback clicked;
 
     property <bool> sunken: area.pressed || root.active;
     property <bool> neon: root.primary || (root.active && root.enabled);
 
     height: 36px;
-    min-width: label.preferred-width + 28px;
+    min-width: label.preferred-width + 28px + (root.icon != "" ? 21px : 0px);
     border-radius: 18px;
-    background: !root.enabled ? transparent
-        : root.primary ? (area.pressed ? Theme.accent.darker(12%) : Theme.accent)
+    opacity: root.enabled ? 1 : 0.45;
+    background: root.primary ? (area.pressed ? Theme.accent.darker(12%) : Theme.accent)
+        : root.danger ? (area.has-hover ? Theme.danger.transparentize(0.7) : Theme.danger.transparentize(0.85))
         : root.sunken ? Theme.well
-        : (area.has-hover ? Theme.surface.brighter(Theme.dark ? 6% : 2%) : Theme.surface);
-    border-width: root.neon ? 1.5px : 1px;
-    border-color: root.neon ? Theme.accent
-        : root.sunken ? Theme.shadow-dark.transparentize(0.4)
-        : Theme.shadow-light.transparentize(Theme.dark ? 0.3 : 0.0);
-    drop-shadow-blur: root.neon ? 16px : (root.enabled && !root.sunken ? 10px : 0px);
-    drop-shadow-offset-x: root.neon ? 0px : 4px;
-    drop-shadow-offset-y: root.neon ? 0px : 4px;
-    drop-shadow-color: root.neon ? Theme.accent-glow : Theme.shadow-dark.transparentize(Theme.dark ? 0.2 : 0.4);
+        : (area.has-hover ? Theme.surface.brighter(Theme.dark ? 6% : 0%) : Theme.surface);
+    border-width: root.neon || root.danger ? 1.5px : 1px;
+    border-color: root.danger ? Theme.danger
+        : root.neon ? Theme.accent
+        : root.sunken ? Theme.border
+        : Theme.border;
+    drop-shadow-blur: root.neon ? 14px : (root.enabled && !root.sunken && !root.danger ? 8px : 0px);
+    drop-shadow-offset-x: root.neon ? 0px : 2px;
+    drop-shadow-offset-y: root.neon ? 0px : 3px;
+    drop-shadow-color: root.neon ? Theme.accent-glow : Theme.shadow-dark.transparentize(Theme.dark ? 0.2 : 0.5);
     animate background { duration: 120ms; }
 
-    label := Text {
-        text: root.text;
-        color: !root.enabled ? Theme.text-dim.transparentize(0.4)
-            : root.primary ? Theme.accent-ink
-            : root.active ? Theme.accent : Theme.text;
-        font-size: 13px;
-        font-weight: root.neon ? 600 : 500;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 6px;
+        alignment: center;
+
+        // Layouts pin fixed-height children to the top, so the icon sits in a full-height slot and centers itself.
+        if root.icon != "": Rectangle {
+            width: 15px;
+            MailIcon {
+                name: root.icon;
+                width: 15px;
+                height: 15px;
+                y: (parent.height - self.height) / 2;
+                tint: root.primary ? Theme.accent-ink
+                    : root.danger ? Theme.danger
+                    : root.active ? Theme.accent : Theme.text;
+            }
+        }
+        label := Text {
+            text: root.text;
+            color: root.primary ? Theme.accent-ink
+                : root.danger ? Theme.danger
+                : root.active ? Theme.accent : Theme.text;
+            font-size: 13px;
+            font-weight: root.neon || root.danger ? 600 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
+    Tip { x: (root.width - self.width) / 2; y: root.height + 6px; text: root.tip; active: area.has-hover; }
     area := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 }
+
 
 // Toggle pill for filters and tabs: raised when off, neon-outlined when on.
 export component NeuChip inherits Rectangle {
@@ -145,7 +318,92 @@ export component AccentSwatch inherits Rectangle {
     TouchArea { clicked => { root.clicked(); } }
 }
 
-// Inset text field. Wraps TextInput so clipboard, selection and IME behaviour are kept.
+// Pill dropdown. The list opens in a popup below the control and highlights the chosen entry.
+export component NeuSelect inherits Rectangle {
+    in property <[string]> options;
+    in property <int> current: -1;
+    callback selected(int);
+
+    height: 36px;
+    min-width: 200px;
+    border-radius: 18px;
+    background: area.has-hover ? Theme.surface.brighter(Theme.dark ? 6% : 0%) : Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 8px;
+    drop-shadow-offset-x: 2px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Theme.shadow-dark.transparentize(Theme.dark ? 0.2 : 0.5);
+
+    Text {
+        x: 16px;
+        width: parent.width - 44px;
+        height: parent.height;
+        text: root.current >= 0 && root.current < root.options.length ? root.options[root.current] : "";
+        color: Theme.text;
+        font-size: 13px;
+        font-weight: 500;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    MailIcon {
+        x: root.width - 26px;
+        y: (root.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        name: "chevron-down";
+        tint: Theme.accent;
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 6px;
+        width: root.width;
+        height: root.options.length * 36px + 12px;
+
+        Rectangle {
+            background: Theme.surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: Theme.shadow-dark.transparentize(Theme.dark ? 0.1 : 0.4);
+
+            VerticalLayout {
+                padding: 6px;
+                for option[index] in root.options: Rectangle {
+                    height: 36px;
+                    border-radius: 11px;
+                    background: index == root.current ? Theme.accent-soft : (item-area.has-hover ? Theme.well : transparent);
+
+                    Text {
+                        x: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: option;
+                        color: index == root.current ? Theme.accent : Theme.text;
+                        font-size: 13px;
+                        font-weight: index == root.current ? 600 : 400;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    item-area := TouchArea {
+                        clicked => {
+                            root.selected(index);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    area := TouchArea {
+        clicked => { popup.show(); }
+    }
+}
+
 export component NeuField inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder-text;
@@ -161,7 +419,7 @@ export component NeuField inherits Rectangle {
     background: Theme.well;
     border-radius: Theme.radius-control;
     border-width: 1.5px;
-    border-color: input.has-focus ? Theme.accent : Theme.shadow-dark;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
 
     input := TextInput {
         x: 10px;

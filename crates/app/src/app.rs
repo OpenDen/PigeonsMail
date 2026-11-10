@@ -44,7 +44,7 @@ use zeroize::Zeroizing;
 use crate::actions::{self, Plan};
 use crate::compose::{self as glue, ComposeState, ReplyKind};
 use crate::format::{
-    folder_title, format_full_date, human_size, looks_like_email, provider_defaults,
+    folder_icon, folder_title, format_full_date, human_size, looks_like_email, provider_defaults,
     split_host_port, ServerDefaults,
 };
 use crate::list_model::MessageListModel;
@@ -402,6 +402,8 @@ struct App {
     last_sent_draft: Option<Draft>,
     compose_attachments: Vec<(String, String, Vec<u8>)>,
     manage_account_id: Option<AccountId>,
+    /// Accounts whose folder list is collapsed in the sidebar.
+    collapsed_accounts: HashSet<AccountId>,
     self_ref: RcWeak<RefCell<App>>,
 }
 
@@ -460,15 +462,23 @@ impl App {
             unread: unified as i32,
             folder_id: 0,
             account_id: -1,
+            expanded: false,
+            icon: "stack".into(),
         }];
         for acc in &accounts {
+            let expanded = !self.collapsed_accounts.contains(&acc.id);
             items.push(SidebarItem {
                 kind: 1,
                 title: acc.email.as_str().into(),
                 unread: 0,
                 folder_id: -1,
                 account_id: acc.id as i32,
+                expanded,
+                icon: "mail".into(),
             });
+            if !expanded {
+                continue;
+            }
             for f in folders.iter().filter(|f| f.account_id == acc.id) {
                 items.push(SidebarItem {
                     kind: 2,
@@ -476,6 +486,8 @@ impl App {
                     unread: f.unread as i32,
                     folder_id: f.id as i32,
                     account_id: -1,
+                    expanded: false,
+                    icon: folder_icon(f.role.as_deref()).into(),
                 });
             }
         }
@@ -486,9 +498,19 @@ impl App {
                 unread: 0,
                 folder_id: -(label.id as i32) - 1,
                 account_id: -1,
+                expanded: false,
+                icon: "tag".into(),
             });
         }
         ui.set_sidebar(ModelRc::new(VecModel::from(items)));
+    }
+
+    fn toggle_account(&mut self, account_id: i32) {
+        let id = account_id as AccountId;
+        if !self.collapsed_accounts.remove(&id) {
+            self.collapsed_accounts.insert(id);
+        }
+        self.refresh_sidebar();
     }
 
     /// Removes an account, its synced mail, its keyring password, and stops its sync worker.
@@ -599,15 +621,9 @@ impl App {
         }
     }
 
-    fn manage_next_account(&mut self) {
+    fn manage_select_account(&mut self, index: i32) {
         let accounts = match self.store.borrow().list_accounts() {
-            Ok(accounts) if !accounts.is_empty() => accounts,
-            Ok(_) => {
-                if let Some(ui) = self.ui() {
-                    ui.set_manage_error("No accounts are configured.".into());
-                }
-                return;
-            }
+            Ok(accounts) => accounts,
             Err(e) => {
                 if let Some(ui) = self.ui() {
                     ui.set_manage_error(format!("Cannot list accounts: {e:#}").into());
@@ -615,12 +631,10 @@ impl App {
                 return;
             }
         };
-        let index = accounts
-            .iter()
-            .position(|a| Some(a.id) == self.manage_account_id)
-            .unwrap_or(0);
-        self.manage_account_id = Some(accounts[(index + 1) % accounts.len()].id);
-        self.refresh_manage();
+        if let Some(account) = usize::try_from(index).ok().and_then(|i| accounts.get(i)) {
+            self.manage_account_id = Some(account.id);
+            self.refresh_manage();
+        }
     }
 
     fn refresh_manage(&mut self) {
@@ -658,6 +672,16 @@ impl App {
                 name: l.name.as_str().into(),
             })
             .collect();
+        let account_emails: Vec<slint::SharedString> = accounts
+            .iter()
+            .map(|a| a.email.as_str().into())
+            .collect();
+        let account_index = accounts
+            .iter()
+            .position(|a| a.id == account_id)
+            .map_or(-1, |i| i as i32);
+        ui.set_manage_accounts(ModelRc::new(VecModel::from(account_emails)));
+        ui.set_manage_account_index(account_index);
         ui.set_manage_account(account.email.as_str().into());
         ui.set_manage_rules(ModelRc::new(VecModel::from(rule_items)));
         ui.set_manage_labels(ModelRc::new(VecModel::from(label_items)));
@@ -1710,10 +1734,11 @@ impl App {
         ui.set_compose_body(draft.body.as_str().into());
         ui.set_compose_error("".into());
         ui.set_compose_preview_image(Image::default());
-        ui.set_compose_preview_mode(false);
+        ui.set_compose_preview_mode(true);
         self.compose_attachments = attachments;
         self.refresh_compose_attachments();
         ui.set_show_compose(true);
+        self.render_compose_preview();
         self.compose = Some(ComposeState {
             account_id,
             in_reply_to: draft.in_reply_to.clone(),
@@ -2431,6 +2456,7 @@ pub fn run() -> Result<()> {
             last_sent_draft: None,
             compose_attachments: Vec::new(),
             manage_account_id: None,
+            collapsed_accounts: HashSet::new(),
             self_ref: weak.clone(),
         })
     });
@@ -2593,6 +2619,7 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     }
 
     on!(on_select_folder, |app, id| app.select_folder(id));
+    on!(on_toggle_account, |app, id| app.toggle_account(id));
     on!(on_select_message, |app, id| app.open_message(id));
     on!(on_compose_new, |app| app.compose_new());
     on!(on_reply_message, |app| app.reply_to_open(ReplyKind::Reply));
@@ -2613,7 +2640,7 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     on!(on_close_attachment, |app| app.close_markdown_view());
     on!(on_manage_open, |app| app.open_manage());
     on!(on_close_manage, |app| app.close_manage());
-    on!(on_manage_next_account, |app| app.manage_next_account());
+    on!(on_manage_select_account, |app, index| app.manage_select_account(index));
     on!(on_select_rule, |app, id| app.select_rule(id));
     on!(on_save_rule, |app| app.save_rule());
     on!(on_delete_rule, |app| app.delete_rule());

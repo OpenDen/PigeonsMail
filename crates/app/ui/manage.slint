@@ -1,6 +1,6 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { NeuCard, NeuField, ToolButton } from "widgets.slint";
+import { MacCloseButton, NeuCard, NeuField, NeuSelect, ToolButton } from "widgets.slint";
 
 export struct ManageRule {
     id: int,
@@ -15,6 +15,8 @@ export struct ManageLabel {
 
 export component ManageDialog inherits Rectangle {
     in property <string> account-email;
+    in property <[string]> account-options;
+    in property <int> account-index: -1;
     in property <string> error;
     in property <[ManageRule]> rules;
     in property <[ManageLabel]> labels;
@@ -30,8 +32,8 @@ export component ManageDialog inherits Rectangle {
     in-out property <string> label-name;
     in-out property <string> imap-host;
     in-out property <string> smtp-host;
+    callback select-account(int);
     callback close();
-    callback next-account();
     callback select-rule(int);
     callback save-rule();
     callback delete-rule();
@@ -47,18 +49,24 @@ export component ManageDialog inherits Rectangle {
     TouchArea { }
 
     NeuCard {
-        width: 800px;
-        height: 620px;
+        width: min(800px, root.width - 40px);
+        height: min(620px, root.height - 40px);
 
         VerticalLayout {
             padding: 18px;
             spacing: 10px;
 
             HorizontalLayout {
-                Text { text: "Manage mail"; font-size: 19px; font-weight: 700; color: Theme.text; }
+                spacing: 12px;
+                Text { text: "Manage mail"; font-size: 19px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
-                ToolButton { text: root.account-email + "  ›"; clicked => { root.next-account(); } }
-                ToolButton { text: "Close"; clicked => { root.close(); } }
+                NeuSelect {
+                    width: 280px;
+                    options: root.account-options;
+                    current: root.account-index;
+                    selected(index) => { root.select-account(index); }
+                }
+                MacCloseButton { tip: "Close (Esc)"; clicked => { root.close(); } }
             }
 
             HorizontalLayout {
@@ -76,7 +84,7 @@ export component ManageDialog inherits Rectangle {
                     for rule in root.rules: Rectangle {
                         height: 32px;
                         border-radius: 6px;
-                        background: root.rule-id == rule.id ? Theme.well : transparent;
+                        background: root.rule-id == rule.id ? Theme.accent-soft : transparent;
                         Text {
                             text: (rule.enabled ? "●  " : "○  ") + rule.name;
                             color: Theme.text;
@@ -110,10 +118,10 @@ export component ManageDialog inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    ToolButton { text: "New"; clicked => { root.select-rule(-1); } }
-                    ToolButton { text: "Save"; clicked => { root.save-rule(); } }
-                    ToolButton { text: "Delete"; enabled: root.rule-id >= 0; clicked => { root.delete-rule(); } }
-                    ToolButton { text: "Dry run"; clicked => { root.dry-run(); } }
+                ToolButton { text: "New"; tip: "New rule"; clicked => { root.select-rule(-1); } }
+                ToolButton { text: "Save"; tip: "Save rule"; clicked => { root.save-rule(); } }
+                ToolButton { text: "Delete"; tip: "Delete rule"; danger: true; enabled: root.rule-id >= 0; clicked => { root.delete-rule(); } }
+                ToolButton { text: "Dry run"; tip: "Preview which messages the rule would match"; clicked => { root.dry-run(); } }
                 }
                 Text {
                     text: root.rule-preview;
@@ -132,7 +140,7 @@ export component ManageDialog inherits Rectangle {
                     for label in root.labels: Rectangle {
                         height: 34px;
                         border-radius: 6px;
-                        background: root.label-id == label.id ? Theme.well : transparent;
+                        background: root.label-id == label.id ? Theme.accent-soft : transparent;
                         Text { text: label.name; color: Theme.text; vertical-alignment: center; x: 8px; }
                         TouchArea { clicked => { root.select-label(label.id); } }
                     }
@@ -140,10 +148,10 @@ export component ManageDialog inherits Rectangle {
                 NeuField { text <=> root.label-name; placeholder-text: "Label name"; }
                 HorizontalLayout {
                     spacing: 8px;
-                    ToolButton { text: "Create"; clicked => { root.create-label(); } }
-                    ToolButton { text: "Rename"; enabled: root.label-id >= 0; clicked => { root.rename-label(); } }
-                    ToolButton { text: "Toggle on open message"; clicked => { root.apply-label(); } }
-                    ToolButton { text: "Delete"; enabled: root.label-id >= 0; clicked => { root.delete-label(); } }
+                    ToolButton { text: "Create"; tip: "Create label"; clicked => { root.create-label(); } }
+                    ToolButton { text: "Rename"; tip: "Rename selected label"; enabled: root.label-id >= 0; clicked => { root.rename-label(); } }
+                    ToolButton { text: "Toggle on open message"; tip: "Add or remove this label on the open message"; clicked => { root.apply-label(); } }
+                    ToolButton { text: "Delete"; tip: "Delete selected label"; danger: true; enabled: root.label-id >= 0; clicked => { root.delete-label(); } }
                 }
             }
 
@@ -154,7 +162,7 @@ export component ManageDialog inherits Rectangle {
                 NeuField { text <=> root.imap-host; placeholder-text: "imap.example.com or imap.example.com:993"; }
                 Text { text: "SMTP host (STARTTLS on port 587)"; color: Theme.text-dim; font-size: 12px; }
                 NeuField { text <=> root.smtp-host; placeholder-text: "smtp.example.com"; }
-                ToolButton { text: "Save and reconnect"; clicked => { root.save-servers(); } }
+                ToolButton { text: "Save and reconnect"; tip: "Save server settings and reconnect accounts"; clicked => { root.save-servers(); } }
             }
 
             if root.error != "": Text { text: root.error; color: Theme.danger; font-size: 12px; wrap: word-wrap; }

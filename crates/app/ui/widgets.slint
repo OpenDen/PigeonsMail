@@ -1,27 +1,28 @@
 import { Theme } from "theme.slint";
 
-// Raised surface: base colour, dark shadow lower-right and a light edge top-left.
+// Raised surface: soft dark shadow lower-right and a light rim top-left.
 export component NeuCard inherits Rectangle {
     background: Theme.surface;
     border-radius: Theme.radius-card;
     border-width: 1px;
-    border-color: Theme.shadow-light;
-    drop-shadow-blur: 12px;
-    drop-shadow-offset-x: 4px;
-    drop-shadow-offset-y: 4px;
-    drop-shadow-color: Theme.shadow-dark;
+    border-color: Theme.shadow-light.transparentize(Theme.dark ? 0.2 : 0.0);
+    drop-shadow-blur: Theme.dark ? 18px : 14px;
+    drop-shadow-offset-x: 6px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: Theme.shadow-dark.transparentize(Theme.dark ? 0.1 : 0.35);
 }
 
 // Inset surface for selected rows and wells. Slint has no inset shadow, so a darker fill
-// with a shadow-coloured edge stands in for it.
+// with a thin edge stands in for it.
 export component NeuWell inherits Rectangle {
     background: Theme.well;
     border-radius: Theme.radius-control;
     border-width: 1px;
-    border-color: Theme.shadow-dark;
+    border-color: Theme.shadow-dark.transparentize(0.4);
 }
 
-// Raised button. Pressed and active states sink into the well colour; primary uses the accent.
+// Raised pill button. Pressed or active sinks into the well colour. Primary and active
+// states get a neon border and glow in the chosen accent.
 export component ToolButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
@@ -30,26 +31,32 @@ export component ToolButton inherits Rectangle {
     callback clicked;
 
     property <bool> sunken: area.pressed || root.active;
+    property <bool> neon: root.primary || (root.active && root.enabled);
 
-    height: 34px;
-    min-width: label.preferred-width + 24px;
-    border-radius: Theme.radius-control;
+    height: 36px;
+    min-width: label.preferred-width + 28px;
+    border-radius: 18px;
     background: !root.enabled ? transparent
-        : root.primary ? (area.pressed ? Theme.accent.darker(10%) : Theme.accent)
+        : root.primary ? (area.pressed ? Theme.accent.darker(12%) : Theme.accent)
         : root.sunken ? Theme.well
-        : (area.has-hover ? Theme.surface.brighter(4%) : Theme.surface);
-    border-width: 1px;
-    border-color: root.sunken ? Theme.shadow-dark : Theme.shadow-light;
-    drop-shadow-blur: root.enabled && !root.sunken ? 8px : 0px;
-    drop-shadow-offset-x: 3px;
-    drop-shadow-offset-y: 3px;
-    drop-shadow-color: Theme.shadow-dark;
+        : (area.has-hover ? Theme.surface.brighter(Theme.dark ? 6% : 2%) : Theme.surface);
+    border-width: root.neon ? 1.5px : 1px;
+    border-color: root.neon ? Theme.accent
+        : root.sunken ? Theme.shadow-dark.transparentize(0.4)
+        : Theme.shadow-light.transparentize(Theme.dark ? 0.3 : 0.0);
+    drop-shadow-blur: root.neon ? 16px : (root.enabled && !root.sunken ? 10px : 0px);
+    drop-shadow-offset-x: root.neon ? 0px : 4px;
+    drop-shadow-offset-y: root.neon ? 0px : 4px;
+    drop-shadow-color: root.neon ? Theme.accent-glow : Theme.shadow-dark.transparentize(Theme.dark ? 0.2 : 0.4);
+    animate background { duration: 120ms; }
 
     label := Text {
         text: root.text;
         color: !root.enabled ? Theme.text-dim.transparentize(0.4)
-            : root.primary ? Theme.accent-text : Theme.text;
+            : root.primary ? Theme.accent-ink
+            : root.active ? Theme.accent : Theme.text;
         font-size: 13px;
+        font-weight: root.neon ? 600 : 500;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -59,27 +66,28 @@ export component ToolButton inherits Rectangle {
     }
 }
 
-// Toggle chip: raised when off, sunken with accent text when on.
+// Toggle pill for filters and tabs: raised when off, neon-outlined when on.
 export component NeuChip inherits Rectangle {
     in property <string> text;
     in-out property <bool> active;
     callback toggled;
 
-    height: 28px;
-    min-width: label.preferred-width + 20px;
-    border-radius: 14px;
-    background: root.active ? Theme.well : Theme.surface;
-    border-width: 1px;
-    border-color: root.active ? Theme.shadow-dark : Theme.shadow-light;
-    drop-shadow-blur: root.active ? 0px : 6px;
-    drop-shadow-offset-x: 2px;
-    drop-shadow-offset-y: 2px;
-    drop-shadow-color: Theme.shadow-dark;
+    height: 30px;
+    min-width: label.preferred-width + 22px;
+    border-radius: 15px;
+    background: root.active ? Theme.accent-soft : Theme.surface;
+    border-width: root.active ? 1.5px : 1px;
+    border-color: root.active ? Theme.accent : Theme.shadow-light.transparentize(Theme.dark ? 0.3 : 0.0);
+    drop-shadow-blur: root.active ? 10px : 6px;
+    drop-shadow-offset-x: root.active ? 0px : 3px;
+    drop-shadow-offset-y: root.active ? 0px : 3px;
+    drop-shadow-color: root.active ? Theme.accent-glow : Theme.shadow-dark.transparentize(0.4);
+    animate background { duration: 120ms; }
 
     label := Text {
         text: root.text;
         font-size: 12px;
-        font-weight: root.active ? 700 : 400;
+        font-weight: root.active ? 600 : 400;
         color: root.active ? Theme.accent : Theme.text;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -90,6 +98,51 @@ export component NeuChip inherits Rectangle {
             root.toggled();
         }
     }
+}
+
+// Sliding switch used for the light/dark theme toggle.
+export component NeuSwitch inherits Rectangle {
+    in property <bool> checked;
+    callback toggled;
+
+    width: 52px;
+    height: 28px;
+    border-radius: 14px;
+    background: root.checked ? Theme.accent-soft : Theme.well;
+    border-width: root.checked ? 1.5px : 1px;
+    border-color: root.checked ? Theme.accent : Theme.shadow-dark.transparentize(0.4);
+    drop-shadow-blur: root.checked ? 10px : 0px;
+    drop-shadow-color: Theme.accent-glow;
+
+    knob := Rectangle {
+        width: 22px;
+        height: 22px;
+        y: 3px;
+        x: root.checked ? root.width - self.width - 3px : 3px;
+        border-radius: 11px;
+        background: root.checked ? Theme.accent : Theme.surface;
+        animate x { duration: 150ms; easing: ease-in-out; }
+    }
+    TouchArea {
+        clicked => { root.toggled(); }
+    }
+}
+
+// Round swatch for choosing the neon accent colour.
+export component AccentSwatch inherits Rectangle {
+    in property <color> swatch;
+    in property <bool> selected;
+    callback clicked;
+
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    background: root.swatch;
+    border-width: root.selected ? 2px : 0px;
+    border-color: Theme.text;
+    drop-shadow-blur: root.selected ? 10px : 0px;
+    drop-shadow-color: root.swatch;
+    TouchArea { clicked => { root.clicked(); } }
 }
 
 // Inset text field. Wraps TextInput so clipboard, selection and IME behaviour are kept.

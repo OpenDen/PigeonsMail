@@ -1,6 +1,6 @@
 import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { NeuCard, NeuChip, NeuField, ToolButton } from "widgets.slint";
+import { AccentSwatch, NeuCard, NeuChip, NeuField, NeuSwitch, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -169,8 +169,7 @@ export component MainWindow inherits Window {
     in-out property <string> acc-smtp-host;
 
     init => {
-        // The custom neumorphic theme is light-only; keep the std ListView/ScrollView light as well.
-        Palette.color-scheme = ColorScheme.light;
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
         keys.focus();
     }
 
@@ -213,14 +212,16 @@ export component MainWindow inherits Window {
                             text: "PigeonMail";
                             font-size: 20px;
                             font-weight: 700;
-                            color: Theme.text;
+                            color: Theme.accent;
                         }
 
                         ListView {
                             for item in root.sidebar: Rectangle {
-                                height: item.kind == 1 ? 34px : 32px;
-                                border-radius: 8px;
-                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.well : transparent;
+                                height: 34px;
+                                border-radius: 10px;
+                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
+                                border-width: item.kind != 1 && root.selected-folder == item.folder-id ? 1px : 0px;
+                                border-color: Theme.accent.transparentize(0.4);
 
                                 HorizontalLayout {
                                     padding-left: (item.kind == 2 || item.kind == 3) ? 18px : 8px;
@@ -230,7 +231,7 @@ export component MainWindow inherits Window {
                                         text: item.title;
                                         font-size: item.kind == 1 ? 11px : 13px;
                                         font-weight: item.kind == 0 ? 700 : 400;
-                                        color: item.kind == 1 ? Theme.text-dim : Theme.text;
+                                        color: item.kind == 1 ? Theme.text-dim : (root.selected-folder == item.folder-id ? Theme.accent : Theme.text);
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
@@ -269,7 +270,27 @@ export component MainWindow inherits Window {
                         }
 
                         VerticalLayout {
-                            spacing: 6px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: space-between;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    AccentSwatch { swatch: Theme.accent-palette[0]; selected: Theme.accent-index == 0; clicked => { Theme.accent-index = 0; } }
+                                    AccentSwatch { swatch: Theme.accent-palette[1]; selected: Theme.accent-index == 1; clicked => { Theme.accent-index = 1; } }
+                                    AccentSwatch { swatch: Theme.accent-palette[2]; selected: Theme.accent-index == 2; clicked => { Theme.accent-index = 2; } }
+                                    AccentSwatch { swatch: Theme.accent-palette[3]; selected: Theme.accent-index == 3; clicked => { Theme.accent-index = 3; } }
+                                }
+                                NeuSwitch {
+                                    checked: Theme.dark;
+                                    toggled => {
+                                        Theme.dark = !Theme.dark;
+                                        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+                                    }
+                                }
+                            }
+
                             ToolButton { text: "Refresh"; clicked => { root.refresh(); } }
                             ToolButton { text: "Compose (c)"; primary: true; clicked => { root.compose-new(); } }
                             ToolButton { text: "Manage"; clicked => { root.manage-open(); } }

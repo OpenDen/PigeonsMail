@@ -152,6 +152,13 @@ const MAX_COMPOSE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_COMPOSE_ATTACHMENTS: usize = 10;
 const MAX_COMPOSE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SAVED_ATTACHMENT_BYTES: usize = 40 * 1024 * 1024;
+// Markdown attachments up to this size can be rendered in the reader instead of saved.
+const MAX_MARKDOWN_VIEW_BYTES: usize = 1024 * 1024;
+
+fn is_markdown_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
 
 fn mime_for_name(name: &str) -> String {
     match name
@@ -1177,6 +1184,7 @@ impl App {
     /// Parses `raw` and builds the render view for the open message.
     fn show_body(&mut self, raw: &[u8]) {
         let Some(ui) = self.ui() else { return };
+        ui.set_reader_attachment("".into());
         let scale = ui.window().scale_factor();
         let (w, h) = self.viewport;
         let Some(reader) = self.reader.as_mut() else {
@@ -1802,11 +1810,19 @@ impl App {
         self.refresh_compose_attachments();
     }
 
-    fn insert_compose_format(&mut self, format: &str) {
+    fn insert_compose_format(&mut self, format: &str, anchor: i32, cursor: i32) {
         let Some(ui) = self.ui() else { return };
-        let mut body = ui.get_compose_body().to_string();
-        glue::insert_format_template(&mut body, format);
-        ui.set_compose_body(body.into());
+        let body = ui.get_compose_body().to_string();
+        let (text, start, end) = glue::apply_format(
+            &body,
+            anchor.max(0) as usize,
+            cursor.max(0) as usize,
+            format,
+        );
+        ui.set_compose_body(text.into());
+        ui.set_compose_select_anchor(start as i32);
+        ui.set_compose_select_cursor(end as i32);
+        ui.set_compose_select_serial(ui.get_compose_select_serial().wrapping_add(1));
     }
 
     fn render_compose_preview(&mut self) {
@@ -1831,6 +1847,40 @@ impl App {
                 ui.set_compose_error(format!("Cannot render preview: {e:#}").into());
                 ui.set_compose_preview_mode(false);
             }
+        }
+    }
+
+    /// Shows a Markdown attachment in the reader, rendered with the same sanitizing path as compose.
+    fn show_markdown_attachment(&mut self, name: &str, bytes: &[u8]) {
+        let Some(ui) = self.ui() else { return };
+        let scale = ui.window().scale_factor();
+        let (w, h) = self.viewport;
+        let text = String::from_utf8_lossy(bytes);
+        let (_, html) = glue::render_markdown(&text);
+        let parsed = ParsedEmail {
+            html: Some(html),
+            attachments: Vec::new(),
+            cid_images: Vec::new(),
+        };
+        let Some(reader) = self.reader.as_mut() else { return };
+        match EmailView::new(&parsed, w, h, scale) {
+            Ok(view) => {
+                reader.view = Some(view);
+                ui.set_reader_attachment(name.into());
+                self.render();
+            }
+            Err(e) => self.notify(format!("Cannot render Markdown: {e:#}")),
+        }
+    }
+
+    /// Returns from a rendered Markdown attachment to the message itself.
+    fn close_markdown_view(&mut self) {
+        let Some(id) = self.reader.as_ref().map(|r| r.loc.id) else {
+            return;
+        };
+        let body = { self.store.borrow_mut().get_body(id, now_ts()) };
+        if let Ok(Some(raw)) = body {
+            self.show_body(&raw);
         }
     }
 
@@ -1861,6 +1911,19 @@ impl App {
         if bytes.len() > MAX_SAVED_ATTACHMENT_BYTES {
             self.notify("This attachment exceeds the 40 MiB save limit.");
             return;
+        }
+        if is_markdown_name(&name) && bytes.len() <= MAX_MARKDOWN_VIEW_BYTES {
+            let view_here = rfd::MessageDialog::new()
+                .set_title("Show Markdown?")
+                .set_description(
+                    "Show this Markdown file rendered in the reader? Choose No to save it instead.",
+                )
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if view_here == rfd::MessageDialogResult::Yes {
+                self.show_markdown_attachment(&name, &bytes);
+                return;
+            }
         }
         let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() else {
             return;
@@ -2543,10 +2606,11 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
         .add_compose_attachments());
     on!(on_compose_remove_attachment, |app, index| app
         .remove_compose_attachment(index));
-    on!(on_compose_format, |app, format| app
-        .insert_compose_format(format.as_str()));
+    on!(on_compose_format, |app, format, anchor, cursor| app
+        .insert_compose_format(format.as_str(), anchor, cursor));
     on!(on_compose_preview, |app| app.render_compose_preview());
     on!(on_open_attachment, |app, index| app.open_attachment(index));
+    on!(on_close_attachment, |app| app.close_markdown_view());
     on!(on_manage_open, |app| app.open_manage());
     on!(on_close_manage, |app| app.close_manage());
     on!(on_manage_next_account, |app| app.manage_next_account());

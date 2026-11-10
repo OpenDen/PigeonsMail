@@ -1,4 +1,4 @@
-import { LineEdit, TextEdit } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ToolButton } from "widgets.slint";
 
@@ -8,7 +8,8 @@ export struct ComposeAttachment {
     index: int,
 }
 
-// Modal compose window. It only holds the fields; the app owns sending and discarding.
+// Floating compose window in the Gmail style. It sits over the mailbox without a backdrop and
+// only holds the fields; the app owns sending, discarding, and formatting.
 export component ComposeDialog inherits Rectangle {
     in-out property <string> to;
     in-out property <string> cc;
@@ -19,68 +20,87 @@ export component ComposeDialog inherits Rectangle {
     in property <image> preview-image;
     in-out property <bool> preview-mode: false;
     in property <[ComposeAttachment]> attachments;
+    // Selection to restore after the app rewrites the body. Each change of `select-serial`
+    // applies the selection, so repeating the same range still takes effect.
+    in property <int> select-anchor;
+    in property <int> select-cursor;
+    in property <int> select-serial;
     callback send();
     callback discard();
     callback add-attachment();
     callback remove-attachment(int);
-    callback format(string);
+    callback format(string, int, int);
     callback preview();
 
-    background: #00000060;
-    TouchArea { }
+    width: 560px;
+    height: 600px;
+    border-radius: 12px;
+    background: Theme.surface;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: Theme.shadow-dark;
+    clip: true;
 
-    Rectangle {
-        width: 760px;
-        height: 650px;
-        border-radius: 14px;
-        background: Theme.surface;
+    changed select-serial => {
+        editor.set-selection-offsets(root.select-anchor, root.select-cursor);
+        editor.focus();
+    }
 
-        VerticalLayout {
-            padding: 20px;
-            spacing: 8px;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
 
-            Text { text: "New message"; font-size: 18px; font-weight: 700; color: Theme.text; }
-            Text { text: "From " + root.from-address; font-size: 12px; color: Theme.text-dim; }
-            Text { text: "To"; font-size: 12px; color: Theme.text-dim; }
-            LineEdit { text <=> root.to; placeholder-text: "name@example.com, another@example.com"; }
-            Text { text: "Cc"; font-size: 12px; color: Theme.text-dim; }
-            LineEdit { text <=> root.cc; }
-            Text { text: "Subject"; font-size: 12px; color: Theme.text-dim; }
-            LineEdit { text <=> root.subject; }
-            HorizontalLayout {
-                spacing: 6px;
-                ToolButton { text: "Bold"; clicked => { root.format("bold"); } }
-                ToolButton { text: "Italic"; clicked => { root.format("italic"); } }
-                ToolButton { text: "Link"; clicked => { root.format("link"); } }
-                ToolButton { text: "Quote"; clicked => { root.format("quote"); } }
-                ToolButton { text: "List"; clicked => { root.format("list"); } }
-                ToolButton { text: "Add file"; clicked => { root.add-attachment(); } }
-                ToolButton {
-                    text: root.preview-mode ? "Edit" : "Preview";
-                    clicked => {
-                        root.preview-mode = !root.preview-mode;
-                        if root.preview-mode { root.preview(); }
-                    }
+        HorizontalLayout {
+            Text { text: "New message"; font-size: 15px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
+            Rectangle { }
+            ToolButton { text: "×"; clicked => { root.discard(); } }
+        }
+        Text { text: "From " + root.from-address; font-size: 12px; color: Theme.text-dim; }
+        LineEdit { text <=> root.to; placeholder-text: "To"; }
+        LineEdit { text <=> root.cc; placeholder-text: "Cc"; }
+        LineEdit { text <=> root.subject; placeholder-text: "Subject"; }
+        HorizontalLayout {
+            spacing: 4px;
+            ToolButton { text: "B"; clicked => { root.format("bold", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "I"; clicked => { root.format("italic", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "S"; clicked => { root.format("strike", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "<>"; clicked => { root.format("code", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "Link"; clicked => { root.format("link", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "Quote"; clicked => { root.format("quote", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "•"; clicked => { root.format("bullet", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            ToolButton { text: "1."; clicked => { root.format("numbered", editor.anchor-position-byte-offset, editor.cursor-position-byte-offset); } }
+            Rectangle { }
+            ToolButton {
+                text: root.preview-mode ? "Edit" : "Preview";
+                clicked => {
+                    root.preview-mode = !root.preview-mode;
+                    if root.preview-mode { root.preview(); }
                 }
             }
-            if root.attachments.length > 0: HorizontalLayout {
-                spacing: 6px;
-                for a in root.attachments: ToolButton {
-                    text: a.name + " (" + a.size + ") ×";
-                    clicked => { root.remove-attachment(a.index); }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            ToolButton { text: "Attach"; clicked => { root.add-attachment(); } }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.background;
+            border-radius: 8px;
+            clip: true;
+            ScrollView {
+                visible: !root.preview-mode;
+                editor := TextInput {
+                    text <=> root.body;
+                    single-line: false;
+                    wrap: word-wrap;
+                    font-size: 13px;
+                    color: Theme.text;
+                    width: parent.width - 16px;
+                    x: 8px;
+                    y: 8px;
                 }
-            }
-            if !root.preview-mode: TextEdit {
-                text <=> root.body;
-                wrap: word-wrap;
-                font-size: 13px;
-                vertical-stretch: 1;
-                placeholder-text: "Write in Markdown. Use the formatting controls or open Preview.";
             }
             if root.preview-mode: Rectangle {
-                vertical-stretch: 1;
-                clip: true;
-                border-radius: 8px;
                 background: white;
                 Image {
                     source: root.preview-image;
@@ -89,18 +109,24 @@ export component ComposeDialog inherits Rectangle {
                     image-fit: contain;
                 }
             }
-            if root.error != "": Text {
-                text: root.error;
-                color: Theme.danger;
-                font-size: 12px;
-                wrap: word-wrap;
+        }
+        if root.attachments.length > 0: HorizontalLayout {
+            spacing: 6px;
+            for a in root.attachments: ToolButton {
+                text: a.name + " (" + a.size + ") ×";
+                clicked => { root.remove-attachment(a.index); }
             }
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: end;
-                ToolButton { text: "Discard"; clicked => { root.discard(); } }
-                ToolButton { text: "Send"; clicked => { root.send(); } }
-            }
+        }
+        if root.error != "": Text {
+            text: root.error;
+            color: Theme.danger;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            ToolButton { text: "Send"; clicked => { root.send(); } }
+            Rectangle { }
         }
     }
 }

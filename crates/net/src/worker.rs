@@ -8,16 +8,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_imap::extensions::idle::IdleResponse;
 use futures::future::BoxFuture;
-use mailthin_core::{AccountId, OutgoingMail, Rule};
+use pigeonmail_core::{AccountId, OutgoingMail, Rule};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::events::{SyncEvent, SyncStatus};
+use crate::events::{NewMailNotice, SyncEvent, SyncStatus};
 use crate::imap::{self, Caps, Credential, FolderSync, ImapFlag, ImapSession, ImapSettings};
 use crate::smtp::{self, SmtpSettings};
+use pigeonmail_core::flags;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
-const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Number of newest arrivals carried in a `NewMail` event.
+const NEW_MAIL_LIST_LIMIT: usize = 20;
 const BACKOFF_MIN: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -136,6 +139,11 @@ impl AccountHandle {
                 .try_send(other)
                 .map_err(|e| anyhow::anyhow!("cannot reach account worker: {e}")),
         }
+    }
+
+    /// Whether a command can be queued now without blocking (used to hold back bulk actions).
+    pub fn has_capacity(&self) -> bool {
+        self.commands.capacity() > 0
     }
 
     /// Queues an outgoing message. Sending runs on its own task, so it never waits for sync.
@@ -592,6 +600,31 @@ impl Worker {
         }
     }
 
+    /// Announces unread arrivals from one INBOX check (the newest 20 are kept for the notice).
+    async fn announce_new_mail(&self, messages: &[crate::events::FetchedMessage]) -> Result<()> {
+        let unread: Vec<NewMailNotice> = messages
+            .iter()
+            .filter(|m| m.flags & flags::SEEN == 0)
+            .map(|m| NewMailNotice {
+                sender: m.from.clone(),
+                subject: m.subject.clone(),
+                has_attachment: m.has_attachment,
+            })
+            .collect();
+        if unread.is_empty() {
+            return Ok(());
+        }
+        let count = unread.len();
+        let skip = count.saturating_sub(NEW_MAIL_LIST_LIMIT);
+        let latest = unread.into_iter().skip(skip).collect();
+        self.emit(SyncEvent::NewMail {
+            account_id: self.account_id,
+            count,
+            latest,
+        })
+        .await
+    }
+
     async fn sync_all(&mut self, session: &mut ImapSession) -> Result<()> {
         let folders = imap::list_folders(session).await?;
         let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
@@ -641,6 +674,10 @@ impl Worker {
         let changed = known != Some((uidvalidity, last_uid));
         self.states
             .insert(folder.to_string(), (uidvalidity, last_uid));
+
+        if folder == "INBOX" && known.is_some() && !reset {
+            self.announce_new_mail(&messages).await?;
+        }
 
         if changed || reset || !messages.is_empty() {
             self.emit(SyncEvent::Messages {

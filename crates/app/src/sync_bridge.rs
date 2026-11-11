@@ -3,11 +3,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use mailthin_core::{flags, AccountId, RuleAction};
-use mailthin_net::imap::ImapFlag;
-use mailthin_net::worker::MailAction;
-use mailthin_net::{SyncEvent, SyncStatus};
-use mailthin_store::{MailStore, NewMessage};
+use pigeonmail_core::{flags, AccountId, RuleAction};
+use pigeonmail_net::imap::ImapFlag;
+use pigeonmail_net::worker::MailAction;
+use pigeonmail_net::{SyncEvent, SyncStatus};
+use pigeonmail_store::{MailStore, NewMessage};
 use tokio::sync::mpsc;
 
 /// Cached message bodies kept on disk before the least recently used are evicted.
@@ -32,6 +32,7 @@ pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<Serve
     let mut server = Vec::new();
     match event {
         SyncEvent::Status { .. }
+        | SyncEvent::NewMail { .. }
         | SyncEvent::ActionFailed { .. }
         | SyncEvent::Sent { .. }
         | SyncEvent::SendFailed { .. } => {}
@@ -142,7 +143,7 @@ pub fn apply_event(store: &mut MailStore, event: &SyncEvent) -> Result<Vec<Serve
         } => {
             // The message may have been moved or deleted while the download was in flight.
             if let Some(id) = store.find_message(*account_id, folder, *uid)? {
-                let preview = mailthin_render::preview(raw);
+                let preview = pigeonmail_render::preview(raw);
                 let text = preview.as_ref().map_or("", |p| p.text.as_str());
                 store.put_body(id, raw, text, now_ts())?;
                 if let Some(p) = &preview {
@@ -173,6 +174,7 @@ fn account_of(event: &SyncEvent) -> AccountId {
         | SyncEvent::Folders { account_id, .. }
         | SyncEvent::Messages { account_id, .. }
         | SyncEvent::FolderState { account_id, .. }
+        | SyncEvent::NewMail { account_id, .. }
         | SyncEvent::BodyFetched { account_id, .. }
         | SyncEvent::ActionFailed { account_id, .. }
         | SyncEvent::Sent { account_id, .. }
@@ -226,8 +228,8 @@ pub fn spawn_store_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailthin_net::{FetchedMessage, FolderInfo};
-    use mailthin_store::{ListScope, MessageQuery, NewAccount};
+    use pigeonmail_net::{FetchedMessage, FolderInfo};
+    use pigeonmail_store::{ListScope, MessageQuery, NewAccount};
     use zeroize::Zeroizing;
 
     fn open() -> (tempfile::TempDir, MailStore, AccountId) {

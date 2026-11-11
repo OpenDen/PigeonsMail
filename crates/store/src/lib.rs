@@ -1,5 +1,6 @@
 //! Encrypted SQLCipher persistence, FTS5 search and the lazy body cache.
 pub mod keystore;
+pub mod legacy;
 pub mod queries;
 
 pub use queries::{
@@ -10,7 +11,7 @@ pub use queries::{
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
-use mailthin_core::{AccountId, LabelId, MessageId, Rule};
+use pigeonmail_core::{AccountId, LabelId, MessageId, Rule};
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
@@ -576,7 +577,7 @@ impl MailStore {
         for (uid, flags) in states {
             tx.execute(
                 "UPDATE messages SET flags = (?3 | (flags & ?4)) WHERE folder_id = ?1 AND uid = ?2",
-                params![folder_id, uid, flags, mailthin_core::flags::HAS_ATTACHMENT],
+                params![folder_id, uid, flags, pigeonmail_core::flags::HAS_ATTACHMENT],
             )?;
         }
         let local = {
@@ -602,7 +603,7 @@ impl MailStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailthin_core::{Condition, RuleAction};
+    use pigeonmail_core::{Condition, RuleAction};
 
     const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 

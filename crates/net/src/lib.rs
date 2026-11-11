@@ -6,6 +6,6 @@ pub mod remote;
 pub mod smtp;
 pub mod worker;
 
-pub use events::{FetchedMessage, FolderInfo, MessageState, SyncEvent, SyncStatus};
+pub use events::{FetchedMessage, FolderInfo, MessageState, NewMailNotice, SyncEvent, SyncStatus};
 pub use smtp::SmtpSettings;
 pub use worker::{AccountCommand, AccountConfig, AccountHandle, MailAction, SendRequest};

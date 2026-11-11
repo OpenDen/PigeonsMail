@@ -146,7 +146,7 @@ consent flow is designed.
 
 ## Manual test checklist (quick run)
 
-1. Build with `cargo build --release -p mailthin-app`; start `target\release\mailthin-app.exe`.
+1. Build with `cargo build --release -p pigeonmail-app`; start `target\release\pigeonmail-app.exe`.
 2. Sign in to an account; confirm headers sync and the list populates.
 3. Open a cached and an uncached message; check the reader, links and selection.
 4. Archive, delete and star a message; confirm the change on the server (webmail).

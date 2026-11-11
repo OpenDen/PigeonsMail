@@ -8,12 +8,15 @@ export struct MessageItem {
     id: int,
     sender: string,
     subject: string,
-    snippet: string,
     date: string,
     group: string,
+    sub-group: string,
+    domain-collapsed: bool,
+    address-collapsed: bool,
     unread: bool,
     starred: bool,
     has-attachment: bool,
+    checked: bool,
     initials: string,
     avatar: color,
 }
@@ -62,10 +65,17 @@ export component MainWindow inherits Window {
     in-out property <bool> filter-unread;
     in-out property <bool> filter-starred;
     in-out property <bool> filter-attachments;
+    in-out property <bool> group-by-domain;
+    in property <int> checked-count: 0;
     callback select-message(int);
     callback close-reader();
     callback search-changed(string);
     callback filters-changed();
+    callback toggle-check(int);
+    callback toggle-group(string);
+    callback select-all-matches();
+    callback clear-checked();
+    callback delete-selected();
 
     // Reader
     in property <bool> has-message: false;
@@ -365,22 +375,49 @@ export component MainWindow inherits Window {
                             accepted => { keys.focus(); }
                         }
 
-                        HorizontalLayout {
+                        GridLayout {
                             spacing: 6px;
                             NeuChip {
+                                row: 0;
+                                col: 0;
+                                text: "Group By";
+                                active <=> root.group-by-domain;
+                                toggled => { keys.focus(); root.filters-changed(); }
+                            }
+                            NeuChip {
+                                row: 0;
+                                col: 1;
                                 text: "Unread";
                                 active <=> root.filter-unread;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
                             NeuChip {
+                                row: 1;
+                                col: 0;
                                 text: "Starred";
                                 active <=> root.filter-starred;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
                             NeuChip {
+                                row: 1;
+                                col: 1;
                                 text: "Attachments";
                                 active <=> root.filter-attachments;
                                 toggled => { keys.focus(); root.filters-changed(); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ToolButton { text: "Select all"; tip: "Select every message in this list"; clicked => { root.select-all-matches(); } }
+                            ToolButton { text: "Clear"; tip: "Clear selection"; enabled: root.checked-count > 0; clicked => { root.clear-checked(); } }
+                            ToolButton {
+                                text: root.checked-count > 0 ? "Delete \{root.checked-count}" : "Delete";
+                                icon: "trash";
+                                tip: "Move the selected messages to Trash";
+                                danger: true;
+                                enabled: root.checked-count > 0;
+                                clicked => { root.delete-selected(); }
                             }
                         }
 
@@ -388,21 +425,61 @@ export component MainWindow inherits Window {
                             for m[i] in root.messages: VerticalLayout {
                                 width: 288px;
                                 spacing: 4px;
-                                if i == 0 || root.messages[Math.max(i - 1, 0)].group != m.group: Text {
-                                    text: m.group;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    color: Theme.accent;
+                                if i == 0 || root.messages[Math.max(i - 1, 0)].group != m.group: TouchArea {
+                                    width: 288px;
                                     height: 22px;
-                                    vertical-alignment: bottom;
+                                    clicked => {
+                                        if root.group-by-domain { root.toggle-group(m.group); }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        if root.group-by-domain: MailIcon {
+                                            name: m.domain-collapsed ? "chevron-right" : "chevron-down";
+                                            width: 12px;
+                                            height: 12px;
+                                            y: 6px;
+                                            tint: Theme.accent;
+                                        }
+                                        Text {
+                                            text: m.group;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            color: Theme.accent;
+                                            vertical-alignment: bottom;
+                                        }
+                                    }
                                 }
-                                Rectangle {
+                                if root.group-by-domain && !m.domain-collapsed && (i == 0 || root.messages[Math.max(i - 1, 0)].sub-group != m.sub-group): TouchArea {
+                                    width: 288px;
+                                    height: 20px;
+                                    clicked => { root.toggle-group(m.sub-group); }
+                                    HorizontalLayout {
+                                        padding-left: 4px;
+                                        spacing: 4px;
+                                        MailIcon {
+                                            name: m.address-collapsed ? "chevron-right" : "chevron-down";
+                                            width: 12px;
+                                            height: 12px;
+                                            y: 4px;
+                                            tint: Theme.text;
+                                        }
+                                        Text {
+                                            text: m.sub-group;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: Theme.text;
+                                            vertical-alignment: bottom;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                                if !m.domain-collapsed && !m.address-collapsed: Rectangle {
                                 height: 72px;
                                 border-radius: 10px;
                                 // Full outline per row, disabled in favour of the top rule below.
                                 // border-width: 1px;
                                 // border-color: Theme.border;
-                                background: root.selected-message == m.id ? Theme.well : transparent;
+                                background: (root.selected-message == m.id || m.checked) ? Theme.well : transparent;
 
                                 Rectangle {
                                     x: 0px;
@@ -424,8 +501,8 @@ export component MainWindow inherits Window {
                                 Avatar {
                                     x: 10px;
                                     y: 10px;
-                                    initials: m.initials;
-                                    tint: m.avatar;
+                                    initials: m.checked ? "✓" : m.initials;
+                                    tint: m.checked ? Theme.accent : m.avatar;
                                 }
 
                                 VerticalLayout {
@@ -456,6 +533,7 @@ export component MainWindow inherits Window {
                                             border-radius: 8px;
                                             background: Theme.well;
                                             MailIcon {
+                                                name: "attach";
                                                 tint: Theme.text-dim;
                                             }
                                         }
@@ -481,17 +559,20 @@ export component MainWindow inherits Window {
                                         color: Theme.text;
                                         overflow: elide;
                                     }
-                                    Text {
-                                        text: m.snippet;
-                                        font-size: 12px;
-                                        color: Theme.text-dim;
-                                        overflow: elide;
-                                    }
                                 }
                                 TouchArea {
                                     clicked => {
                                         keys.focus();
                                         root.select-message(m.id);
+                                    }
+                                }
+                                // Placed after the row TouchArea so the avatar area takes the click.
+                                TouchArea {
+                                    x: 0px;
+                                    width: 48px;
+                                    clicked => {
+                                        keys.focus();
+                                        root.toggle-check(m.id);
                                     }
                                 }
                             }

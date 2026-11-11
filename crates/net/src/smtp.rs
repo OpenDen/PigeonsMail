@@ -7,7 +7,7 @@ use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-use mailthin_core::OutgoingMail;
+use pigeonmail_core::OutgoingMail;
 
 use crate::imap::Credential;
 

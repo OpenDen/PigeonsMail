@@ -1,6 +1,6 @@
 //! Compose glue: converts between the compose window's fields and outgoing mail. Holds no UI calls.
-use mailthin_core::compose::{self, Draft, Original};
-use mailthin_core::{AccountId, OutgoingMail};
+use pigeonmail_core::compose::{self, Draft, Original};
+use pigeonmail_core::{AccountId, OutgoingMail};
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::sync::OnceLock;
 use syntect::highlighting::{Theme, ThemeSet};

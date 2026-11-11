@@ -13,8 +13,8 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-mailthin-core = { path = "crates/core" }
-mailthin-store = { path = "crates/store" }
+pigeonmail-core = { path = "crates/core" }
+pigeonmail-store = { path = "crates/store" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,7 +24,7 @@ webpki-roots = "1.0"
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 url = "2.5"
-mailthin-net = { path = "crates/net" }
+pigeonmail-net = { path = "crates/net" }
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 keyring = { version = "3.2", features = ["windows-native"] }
 argon2 = "0.5"
@@ -42,7 +42,7 @@ litehtml = { version = "0.2.6", features = ["vendored", "pixbuf", "email"] }
 slint = { version = "1.8", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-femtovg", "renderer-software"] }
 slint-build = "1.8"
 open = "5"
-mailthin-render = { path = "crates/render" }
+pigeonmail-render = { path = "crates/render" }
 
 [patch.crates-io]
 litehtml-sys = { path = "vendor/litehtml-sys" }

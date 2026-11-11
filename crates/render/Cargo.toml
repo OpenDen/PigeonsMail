@@ -1,5 +1,5 @@
 [package]
-name = "mailthin-render"
+name = "pigeonmail-render"
 version.workspace = true
 edition.workspace = true
 

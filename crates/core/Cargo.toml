@@ -1,5 +1,5 @@
 [package]
-name = "mailthin-core"
+name = "pigeonmail-core"
 version.workspace = true
 edition.workspace = true
 

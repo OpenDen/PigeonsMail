@@ -4,7 +4,7 @@
 //! writer thread, remote image downloads) reports back through a channel of [`UiMsg`] that a
 //! timer drains on the UI thread.
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -15,23 +15,23 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures::future::BoxFuture;
 use futures::StreamExt;
-use mailthin_core::compose::{Draft, Original};
-use mailthin_core::{
+use pigeonmail_core::compose::{Draft, Original};
+use pigeonmail_core::{
     evaluate_rules, flags, AccountId, Condition, MessageId, MessageSummary, OutgoingMail, Rule,
     RuleAction,
 };
-use mailthin_net::imap::{Credential, ImapSettings};
-use mailthin_net::oauth::{self, OAuthProvider};
-use mailthin_net::remote::fetch_remote_image;
-use mailthin_net::worker::{
+use pigeonmail_net::imap::{Credential, ImapSettings};
+use pigeonmail_net::oauth::{self, OAuthProvider};
+use pigeonmail_net::remote::fetch_remote_image;
+use pigeonmail_net::worker::{
     spawn_account, static_credential, AccountCommand, AccountConfig, AccountHandle,
     CredentialProvider, MailAction,
 };
-use mailthin_net::SendRequest;
-use mailthin_net::SmtpSettings;
-use mailthin_net::{SyncEvent, SyncStatus};
-use mailthin_render::{extract_attachment, parse_email, quote_source, EmailView, ParsedEmail};
-use mailthin_store::{
+use pigeonmail_net::SendRequest;
+use pigeonmail_net::SmtpSettings;
+use pigeonmail_net::{NewMailNotice, SyncEvent, SyncStatus};
+use pigeonmail_render::{extract_attachment, parse_email, quote_source, EmailView, ParsedEmail};
+use pigeonmail_store::{
     keystore, AccountRow, ListScope, MailStore, MessageLocation, MessageQuery, NewAccount,
 };
 use slint::{
@@ -39,6 +39,7 @@ use slint::{
     TimerMode, VecModel,
 };
 use tokio::sync::mpsc;
+use slint::winit_030::WinitWindowAccessor;
 use zeroize::Zeroizing;
 
 use crate::actions::{self, Plan};
@@ -51,12 +52,15 @@ use crate::image_cache::{self, ImageCache};
 use crate::list_model::MessageListModel;
 use crate::memory;
 use crate::sync_bridge::{now_ts, spawn_store_writer, ServerAction};
+use crate::tray::{apply_window_icon, Tray, TrayAction};
+use crate::notify;
 use crate::{
     AttachmentChip, ComposeAttachment, MainWindow, ManageLabel, ManageRule, MessageItem,
     SidebarItem,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
+const WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Delay before trimming, so Slint has dropped the closed message's textures first.
 const TRIM_AFTER_CLOSE: Duration = Duration::from_millis(500);
@@ -76,6 +80,10 @@ enum UiMsg {
     },
     FoldersChanged,
     MessagesChanged,
+    NewMail {
+        count: usize,
+        latest: Vec<NewMailNotice>,
+    },
     BodyReady {
         account_id: AccountId,
         folder: String,
@@ -324,6 +332,10 @@ fn to_ui_msg(event: &SyncEvent) -> Option<UiMsg> {
         SyncEvent::Folders { .. } => UiMsg::FoldersChanged,
         SyncEvent::Messages { .. } => UiMsg::MessagesChanged,
         SyncEvent::FolderState { .. } => UiMsg::MessagesChanged,
+        SyncEvent::NewMail { count, latest, .. } => UiMsg::NewMail {
+            count: *count,
+            latest: latest.clone(),
+        },
         SyncEvent::BodyFetched {
             account_id,
             folder,
@@ -413,6 +425,8 @@ struct App {
     last_sent: Option<OutgoingMail>,
     last_sent_draft: Option<Draft>,
     compose_attachments: Vec<(String, String, Vec<u8>)>,
+    /// Account commands waiting for room in their worker's queue, sent in order by `flush_pending`.
+    pending: VecDeque<(AccountId, AccountCommand)>,
     manage_account_id: Option<AccountId>,
     self_ref: RcWeak<RefCell<App>>,
 }
@@ -588,6 +602,7 @@ impl App {
         q.unread_only = ui.get_filter_unread();
         q.starred_only = ui.get_filter_starred();
         q.attachments_only = ui.get_filter_attachments();
+        q.group_by_domain = ui.get_group_by_domain();
         let text = ui.get_search_text();
         if !text.trim().is_empty() {
             q.search = Some(text.to_string());
@@ -600,6 +615,124 @@ impl App {
         let Some(ui) = self.ui() else { return };
         self.model.set_query(Self::current_query(&ui));
         ui.set_message_count(self.model.len() as i32);
+        ui.set_checked_count(0);
+    }
+
+    fn refresh_checked_count(&self) {
+        if let Some(ui) = self.ui() {
+            ui.set_checked_count(self.model.checked_ids().len() as i32);
+        }
+    }
+
+    fn toggle_check(&mut self, id: i32) {
+        self.model.toggle_checked(id as MessageId);
+        self.refresh_checked_count();
+    }
+
+    fn toggle_group(&mut self, key: &str) {
+        self.model.toggle_collapsed(key);
+    }
+
+    fn clear_checked(&mut self) {
+        self.model.clear_checked();
+        self.refresh_checked_count();
+    }
+
+    /// Ticks every message matching the current folder, filters and search.
+    fn select_all_matches(&mut self) {
+        let query = self.model.query();
+        let ids = self.store.borrow().query_message_ids(&query);
+        match ids {
+            Ok(ids) => self.model.set_checked_all(ids),
+            Err(e) => self.notify(format!("{e:#}")),
+        }
+        self.refresh_checked_count();
+    }
+
+    /// Moves every ticked message to Trash (or expunges it when already there). Commands are queued
+    /// per account so a large selection does not overflow a worker's channel.
+    fn delete_selected(&mut self) {
+        let ids = self.model.checked_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let reader_id = self.reader.as_ref().map(|r| r.loc.id);
+        let mut moved_accounts: HashSet<AccountId> = HashSet::new();
+        let (mut done, mut refused) = (0usize, 0usize);
+        let mut reader_deleted = false;
+        for id in ids {
+            let loc = match self.store.borrow().message_location(id) {
+                Ok(Some(loc)) => loc,
+                _ => continue,
+            };
+            let plan = {
+                let s = self.store.borrow();
+                actions::plan_delete(&s, &loc)
+            };
+            let action = match plan {
+                Ok(Plan::Relocate(action)) => action,
+                Ok(Plan::Refuse(_)) | Err(_) => {
+                    refused += 1;
+                    continue;
+                }
+            };
+            if matches!(action, MailAction::Move { .. }) {
+                moved_accounts.insert(loc.account_id);
+            }
+            self.pending
+                .push_back((loc.account_id, AccountCommand::Action(action)));
+            let deleted = self.store.borrow_mut().delete_message(loc.id);
+            if let Err(e) = deleted {
+                self.notify(format!("{e:#}"));
+            }
+            reader_deleted |= reader_id == Some(loc.id);
+            done += 1;
+        }
+        for account_id in moved_accounts {
+            self.pending
+                .push_back((account_id, AccountCommand::SyncNow));
+        }
+        self.flush_pending();
+
+        self.model.clear_checked();
+        if reader_deleted {
+            self.close_reader();
+        }
+        self.refresh_all();
+        self.refresh_checked_count();
+        let mut text = format!("Moved {done} message(s) to Trash");
+        if refused > 0 {
+            text.push_str(&format!("; {refused} could not be moved"));
+        }
+        self.notify(text);
+    }
+
+    /// Sends queued account commands while their workers have room, keeping their order.
+    fn flush_pending(&mut self) {
+        while let Some(account_id) = self.pending.front().map(|(id, _)| *id) {
+            let state = match self.handles.lock() {
+                Ok(h) => h.get(&account_id).map(|h| h.has_capacity()),
+                Err(_) => None,
+            };
+            match state {
+                // Account is not running: its queued commands cannot be delivered.
+                None => {
+                    self.pending.pop_front();
+                }
+                // Worker queue is full; retry on the next timer tick.
+                Some(false) => break,
+                Some(true) => {
+                    let Some((_, cmd)) = self.pending.pop_front() else { break };
+                    let result = match self.handles.lock() {
+                        Ok(h) => h.get(&account_id).map(|h| h.try_send(cmd)),
+                        Err(_) => None,
+                    };
+                    if let Some(Err(e)) = result {
+                        self.notify(format!("{e:#}"));
+                    }
+                }
+            }
+        }
     }
 
     /// Re-reads list and sidebar after the store changed underneath them.
@@ -1327,7 +1460,7 @@ impl App {
         reader.scroll = reader.scroll.min(total.saturating_sub(viewport_h));
         let buf = view.render_viewport_with(reader.scroll, |width, height, premul| {
             let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-            mailthin_render::view::flatten_on_white_into(premul, buf.make_mut_bytes());
+            pigeonmail_render::view::flatten_on_white_into(premul, buf.make_mut_bytes());
             buf
         });
         ui.set_body_image(Image::from_rgba8(buf));
@@ -1448,7 +1581,7 @@ impl App {
             ui.set_pending_link("".into());
         }
         // Re-validated here as well, so nothing but web and mail links can leave the app.
-        if let Some(url) = url.and_then(|u| mailthin_render::safe_link(&u)) {
+        if let Some(url) = url.and_then(|u| pigeonmail_render::safe_link(&u)) {
             if let Err(e) = open::that_detached(&url) {
                 self.notify(format!("Cannot open link: {e}"));
             }
@@ -1646,6 +1779,7 @@ impl App {
             UiMsg::FoldersChanged => self.refresh_sidebar(),
             UiMsg::LoginChecked { email, error } => self.finish_add_account(&email, error),
             UiMsg::MessagesChanged => self.refresh_all(),
+            UiMsg::NewMail { count, latest } => notify::new_mail(count, &latest),
             UiMsg::BodyReady {
                 account_id,
                 folder,
@@ -1762,7 +1896,7 @@ impl App {
             self.notify("That message is no longer available");
             return;
         };
-        let source = quote_source(&raw).unwrap_or(mailthin_render::QuoteSource {
+        let source = quote_source(&raw).unwrap_or(pigeonmail_render::QuoteSource {
             message_id: None,
             references: Vec::new(),
             text: String::new(),
@@ -1939,7 +2073,7 @@ impl App {
             Ok(mut view) => {
                 let buf = view.render_viewport_with(0, |width, height, premul| {
                     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-                    mailthin_render::view::flatten_on_white_into(premul, buf.make_mut_bytes());
+                    pigeonmail_render::view::flatten_on_white_into(premul, buf.make_mut_bytes());
                     buf
                 });
                 ui.set_compose_preview_image(Image::from_rgba8(buf));
@@ -2452,19 +2586,36 @@ impl App {
 // --------------------------------------------------------------------------- startup
 
 fn data_dir() -> Result<PathBuf> {
-    let dir = std::env::var_os("MAILTHIN_DATA_DIR")
+    let dir = std::env::var_os("PIGEONMAIL_DATA_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("Mailthin")))
+        .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("PigeonMail")))
         .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mailthin"))
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/pigeonmail"))
         })
         .ok_or_else(|| anyhow!("cannot determine a data directory"))?;
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     Ok(dir)
 }
 
+/// Pre-rename data folder, used only to migrate an existing installation.
+fn legacy_data_dir() -> Option<PathBuf> {
+    if std::env::var_os("PIGEONMAIL_DATA_DIR").is_some() {
+        return None;
+    }
+    std::env::var_os("APPDATA")
+        .map(|p| PathBuf::from(p).join("Mailthin"))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mailthin")))
+}
+
 pub fn run() -> Result<()> {
     let data_dir = data_dir()?;
+    if let Some(legacy) = legacy_data_dir() {
+        match pigeonmail_store::legacy::migrate_database(&legacy, &data_dir) {
+            Ok(true) => eprintln!("migrated the mail database from the previous data folder"),
+            Ok(false) => {}
+            Err(e) => eprintln!("could not migrate the previous mail database: {e}"),
+        }
+    }
     let db_path = data_dir.join("mail.db");
     let image_cache = ImageCache::open(&data_dir).ok();
     if let Some(cache) = image_cache.as_ref() {
@@ -2542,6 +2693,7 @@ pub fn run() -> Result<()> {
             last_sent_draft: None,
             compose_attachments: Vec::new(),
             manage_account_id: None,
+            pending: VecDeque::new(),
             self_ref: weak.clone(),
         })
     });
@@ -2570,12 +2722,69 @@ pub fn run() -> Result<()> {
             while let Ok(msg) = ui_rx.try_recv() {
                 shared.borrow_mut().handle(msg);
             }
+            shared.borrow_mut().flush_pending();
         });
     }
 
-    ui.run()?;
+    // Minimize hides the window to the tray (when a tray icon exists); the tray restores or quits.
+    let tray = match Tray::new() {
+        Ok(tray) => Some(tray),
+        Err(e) => {
+            eprintln!("tray icon unavailable, minimize keeps the window in the taskbar: {e:#}");
+            None
+        }
+    };
+    let window_timer = Timer::default();
+    {
+        let weak = ui.as_weak();
+        let mut icon_applied = false;
+        window_timer.start(TimerMode::Repeated, WINDOW_POLL_INTERVAL, move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let window = ui.window();
+            if !icon_applied {
+                icon_applied = window
+                    .with_winit_window(apply_window_icon)
+                    .unwrap_or(false);
+            }
+            let Some(tray) = tray.as_ref() else {
+                return;
+            };
+            let minimized = window
+                .with_winit_window(|w| w.is_minimized())
+                .flatten()
+                .unwrap_or(false);
+            if minimized && window.is_visible() {
+                let _ = window.hide();
+            }
+            match tray.poll() {
+                Some(TrayAction::Show) => {
+                    let _ = window.show();
+                    window.with_winit_window(|w| {
+                        w.set_minimized(false);
+                        w.focus_window();
+                    });
+                }
+                Some(TrayAction::Quit) => {
+                    let _ = slint::quit_event_loop();
+                }
+                None => {}
+            }
+        });
+    }
+
+    // Closing the window quits the app; hiding to the tray must not end the event loop.
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
+    let _ = ui.hide();
 
     // Orderly shutdown: stop the workers, let the writer drain, then exit.
+    drop(window_timer);
     drop(poll);
     drop(ui);
     drop(shared);
@@ -2690,7 +2899,7 @@ async fn oauth_sign_in(
 }
 
 async fn test_imap_login(settings: &ImapSettings, credential: &Credential) -> Result<()> {
-    let mut session = mailthin_net::imap::connect(settings, credential).await?;
+    let mut session = pigeonmail_net::imap::connect(settings, credential).await?;
     let _ = session.logout().await;
     Ok(())
 }
@@ -2738,6 +2947,11 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     on!(on_save_servers, |app| app.save_servers());
     on!(on_search_changed, |app, _text| app.apply_query());
     on!(on_filters_changed, |app| app.apply_query());
+    on!(on_toggle_check, |app, id| app.toggle_check(id));
+    on!(on_toggle_group, |app, key| app.toggle_group(&key));
+    on!(on_select_all_matches, |app| app.select_all_matches());
+    on!(on_clear_checked, |app| app.clear_checked());
+    on!(on_delete_selected, |app| app.delete_selected());
     on!(on_viewport_resized, |app, w, h| app
         .on_viewport_resized(w, h));
     on!(on_body_scrolled, |app, dy| app.on_scrolled(dy));

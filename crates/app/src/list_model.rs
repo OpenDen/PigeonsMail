@@ -1,12 +1,16 @@
 //! Virtualised message list: only the pages near the viewport are kept in memory, however large
 //! the mailbox is. Pages are loaded lazily from the store as Slint asks for rows.
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
-use mailthin_store::{MailStore, MessageQuery, MessageRow};
+use pigeonmail_core::MessageId;
+use pigeonmail_store::{MailStore, MessageQuery, MessageRow};
 use slint::{Model, ModelNotify, ModelTracker};
 
-use crate::format::{avatar_rgb, date_group, display_name, format_list_date, initials};
+use crate::format::{
+    address_domain, avatar_rgb, date_group, display_name, format_list_date, initials, sender_address,
+};
 use crate::MessageItem;
 
 pub const PAGE_SIZE: usize = 50;
@@ -20,6 +24,10 @@ pub struct MessageListModel {
     count: Cell<usize>,
     /// `(page index, rows)`, most recently used last.
     pages: RefCell<Vec<(usize, Vec<MessageRow>)>>,
+    /// Ticked messages for bulk actions.
+    checked: RefCell<HashSet<MessageId>>,
+    /// Collapsed domain groups and sub-groups (domains and full addresses, lower-cased).
+    collapsed: RefCell<HashSet<String>>,
     notify: ModelNotify,
 }
 
@@ -30,6 +38,8 @@ impl MessageListModel {
             query: RefCell::new(query),
             count: Cell::new(0),
             pages: RefCell::new(Vec::new()),
+            checked: RefCell::new(HashSet::new()),
+            collapsed: RefCell::new(HashSet::new()),
             notify: ModelNotify::default(),
         });
         m.recount();
@@ -48,7 +58,12 @@ impl MessageListModel {
 
     pub fn set_query(&self, query: MessageQuery) {
         *self.query.borrow_mut() = query;
+        self.checked.borrow_mut().clear();
         self.reload();
+    }
+
+    pub fn query(&self) -> MessageQuery {
+        self.query.borrow().clone()
     }
 
     /// Re-reads the count and drops cached pages; use after the store changed.
@@ -56,6 +71,46 @@ impl MessageListModel {
         self.pages.borrow_mut().clear();
         self.recount();
         self.notify.reset();
+    }
+
+    /// Ticks or unticks a message for bulk actions.
+    pub fn toggle_checked(&self, id: MessageId) {
+        {
+            let mut checked = self.checked.borrow_mut();
+            if !checked.remove(&id) {
+                checked.insert(id);
+            }
+        }
+        self.invalidate_message(id);
+    }
+
+    /// Ticks every message in `ids` and redraws the list.
+    pub fn set_checked_all(&self, ids: Vec<MessageId>) {
+        *self.checked.borrow_mut() = ids.into_iter().collect();
+        self.reload();
+    }
+
+    pub fn clear_checked(&self) {
+        self.checked.borrow_mut().clear();
+        self.reload();
+    }
+
+    /// Expands or collapses a domain group or sub-group; rows are redrawn so hidden rows take no space.
+    pub fn toggle_collapsed(&self, key: &str) {
+        {
+            let mut collapsed = self.collapsed.borrow_mut();
+            let key = key.to_lowercase();
+            if !collapsed.remove(&key) {
+                collapsed.insert(key);
+            }
+        }
+        self.reload();
+    }
+
+    pub fn checked_ids(&self) -> Vec<MessageId> {
+        let mut ids: Vec<MessageId> = self.checked.borrow().iter().copied().collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Refreshes a single row (e.g. after its flags changed) without resetting the whole list.
@@ -121,21 +176,39 @@ impl MessageListModel {
     }
 }
 
-pub fn to_item(r: &MessageRow, now_ts: i64) -> MessageItem {
+pub fn to_item(
+    r: &MessageRow,
+    now_ts: i64,
+    grouped: bool,
+    checked: bool,
+    collapsed: &HashSet<String>,
+) -> MessageItem {
     let name = display_name(&r.sender);
     let (red, green, blue) = avatar_rgb(&name);
+    let address = sender_address(&r.sender);
+    let (group, sub_group) = if grouped {
+        let domain = address_domain(&address).to_string();
+        (domain, address)
+    } else {
+        (date_group(r.date_ts, now_ts).to_string(), String::new())
+    };
+    let domain_collapsed = grouped && collapsed.contains(&group);
+    let address_collapsed = grouped && collapsed.contains(&sub_group);
     MessageItem {
         id: r.id as i32,
         initials: initials(&name).into(),
         avatar: slint::Color::from_rgb_u8(red, green, blue),
         sender: name.into(),
         subject: if r.subject.is_empty() { "(no subject)".into() } else { r.subject.as_str().into() },
-        snippet: r.snippet.as_str().into(),
         date: format_list_date(r.date_ts, now_ts).into(),
-        group: date_group(r.date_ts, now_ts).into(),
+        group: group.into(),
+        sub_group: sub_group.into(),
+        domain_collapsed,
+        address_collapsed,
         unread: !r.is_read(),
         starred: r.is_starred(),
         has_attachment: r.has_attachment(),
+        checked,
     }
 }
 
@@ -147,7 +220,11 @@ impl Model for MessageListModel {
     }
 
     fn row_data(&self, row: usize) -> Option<MessageItem> {
-        self.row_at(row).map(|r| to_item(&r, crate::sync_bridge::now_ts()))
+        let grouped = self.query.borrow().group_by_domain;
+        self.row_at(row).map(|r| {
+            let checked = self.checked.borrow().contains(&r.id);
+            to_item(&r, crate::sync_bridge::now_ts(), grouped, checked, &self.collapsed.borrow())
+        })
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -158,8 +235,8 @@ impl Model for MessageListModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailthin_core::flags;
-    use mailthin_store::{ListScope, NewAccount, NewMessage};
+    use pigeonmail_core::flags;
+    use pigeonmail_store::{ListScope, NewAccount, NewMessage};
     use zeroize::Zeroizing;
 
     fn store_with(n: u32) -> (tempfile::TempDir, Rc<RefCell<MailStore>>) {

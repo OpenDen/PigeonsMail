@@ -43,13 +43,13 @@ pub static GMAIL: OAuthProvider = OAuthProvider {
     loopback_host: "127.0.0.1",
     imap_host: "imap.gmail.com",
     smtp_host: "smtp.gmail.com",
-    client_id_env: "MAILTHIN_GOOGLE_CLIENT_ID",
+    client_id_env: "PIGEONMAIL_GOOGLE_CLIENT_ID",
     default_client_id: Some("456159786850-ep4ps88vqb7rbkhkcv1ukr31h443ofif.apps.googleusercontent.com"),
-    default_client_secret: match option_env!("MAILTHIN_BUILTIN_GOOGLE_CLIENT_SECRET") {
+    default_client_secret: match option_env!("PIGEONMAIL_BUILTIN_GOOGLE_CLIENT_SECRET") {
         Some(s) if !s.is_empty() => Some(s),
         _ => None,
     },
-    client_secret_env: Some("MAILTHIN_GOOGLE_CLIENT_SECRET"),
+    client_secret_env: Some("PIGEONMAIL_GOOGLE_CLIENT_SECRET"),
     extra_auth_params: &[("access_type", "offline"), ("prompt", "consent")],
 };
 
@@ -65,7 +65,7 @@ pub static OUTLOOK: OAuthProvider = OAuthProvider {
     loopback_host: "localhost",
     imap_host: "outlook.office365.com",
     smtp_host: "smtp.office365.com",
-    client_id_env: "MAILTHIN_MICROSOFT_CLIENT_ID",
+    client_id_env: "PIGEONMAIL_MICROSOFT_CLIENT_ID",
     default_client_id: None,
     default_client_secret: None,
     client_secret_env: None,

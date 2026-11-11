@@ -1,6 +1,6 @@
 //! Events and data produced by account workers. Contains no database types so `net`
 //! stays independent of `store`.
-use mailthin_core::{AccountId, RuleAction};
+use pigeonmail_core::{AccountId, RuleAction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderInfo {
@@ -17,7 +17,7 @@ pub struct FetchedMessage {
     pub to: String,
     pub subject: String,
     pub date_ts: i64,
-    /// Bit set from `mailthin_core::flags`.
+    /// Bit set from `pigeonmail_core::flags`.
     pub flags: u32,
     pub has_attachment: bool,
     /// Actions triggered by the user's rules when the message was first fetched.
@@ -30,6 +30,14 @@ pub enum SyncStatus {
     Syncing,
     Idle,
     Error(String),
+}
+
+/// Header summary of a newly arrived, unread INBOX message, used for notifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMailNotice {
+    pub sender: String,
+    pub subject: String,
+    pub has_attachment: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +68,13 @@ pub enum SyncEvent {
         account_id: AccountId,
         folder: String,
         states: Vec<MessageState>,
+    },
+    /// Unread messages that arrived in INBOX since the previous check. `latest` holds at most
+    /// the 20 newest entries; `count` is the full number of arrivals.
+    NewMail {
+        account_id: AccountId,
+        count: usize,
+        latest: Vec<NewMailNotice>,
     },
     /// A full raw message downloaded on demand.
     BodyFetched {

@@ -1,9 +1,9 @@
 //! Decides which server-side action a keyboard/toolbar command maps to.
 use anyhow::Result;
-use mailthin_core::flags;
-use mailthin_net::imap::ImapFlag;
-use mailthin_net::worker::MailAction;
-use mailthin_store::{MailStore, MessageLocation};
+use pigeonmail_core::flags;
+use pigeonmail_net::imap::ImapFlag;
+use pigeonmail_net::worker::MailAction;
+use pigeonmail_store::{MailStore, MessageLocation};
 
 /// Result of planning a command for one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub fn plan_delete(store: &MailStore, loc: &MessageLocation) -> Result<Plan> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailthin_store::{NewAccount, NewMessage};
+    use pigeonmail_store::{NewAccount, NewMessage};
     use zeroize::Zeroizing;
 
     fn setup(with_archive: bool, with_trash: bool) -> (tempfile::TempDir, MailStore, MessageLocation) {

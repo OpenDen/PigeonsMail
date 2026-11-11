@@ -1,19 +1,19 @@
 [package]
-name = "mailthin-app"
+name = "pigeonmail-app"
 version.workspace = true
 edition.workspace = true
 build = "build.rs"
 
 [dependencies]
-mailthin-core.workspace = true
-mailthin-store.workspace = true
-mailthin-net.workspace = true
-mailthin-render.workspace = true
+pigeonmail-core.workspace = true
+pigeonmail-store.workspace = true
+pigeonmail-net.workspace = true
+pigeonmail-render.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 futures.workspace = true
 chrono.workspace = true
-slint.workspace = true
+slint = { workspace = true, features = ["unstable-winit-030"] }
 open.workspace = true
 arboard = { version = "3.7", default-features = false }
 zeroize.workspace = true
@@ -22,9 +22,12 @@ pulldown-cmark = "0.13.6"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+tray-icon = "0.26.1"
+notify-rust = "4.19.0"
+raw-window-handle = "0.6.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 slint-build.workspace = true

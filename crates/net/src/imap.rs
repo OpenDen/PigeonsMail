@@ -6,7 +6,7 @@ use async_imap::types::{Flag, NameAttribute};
 use async_imap::Authenticator;
 use futures::TryStreamExt;
 use mail_parser::{AddressList, MessageParser};
-use mailthin_core::{evaluate_rules, flags, MessageSummary, Rule};
+use pigeonmail_core::{evaluate_rules, flags, MessageSummary, Rule};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
@@ -549,7 +549,7 @@ pub fn imap_date(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailthin_core::{Condition, RuleAction};
+    use pigeonmail_core::{Condition, RuleAction};
 
     #[test]
     fn imap_date_formats_utc() {

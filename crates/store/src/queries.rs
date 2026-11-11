@@ -1,6 +1,6 @@
 //! Read/update queries used by the UI: message lists, folder tree, filters and search.
 use anyhow::Result;
-use mailthin_core::{flags, AccountId, LabelId, MessageId};
+use pigeonmail_core::{flags, AccountId, LabelId, MessageId};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
@@ -23,6 +23,8 @@ pub struct MessageQuery {
     pub attachments_only: bool,
     /// Raw text typed by the user; converted to a safe FTS5 expression internally.
     pub search: Option<String>,
+    /// Order by sender domain, then sender address, instead of by date.
+    pub group_by_domain: bool,
 }
 
 impl MessageQuery {
@@ -33,6 +35,7 @@ impl MessageQuery {
             starred_only: false,
             attachments_only: false,
             search: None,
+            group_by_domain: false,
         }
     }
 }
@@ -121,6 +124,21 @@ pub fn fts_query_from_user(input: &str) -> Option<String> {
 const SELECT_COLS: &str =
     "m.id, m.account_id, m.folder_id, m.uid, m.sender, m.recipients, m.subject, m.date_ts, m.flags, m.snippet";
 
+/// Lower-cased address of the first sender: the text inside `<...>` when present, otherwise the
+/// whole value. Must match `format::sender_address` in the app crate.
+const SENDER_ADDR_SQL: &str = "lower(trim(CASE WHEN instr(m.sender, '<') > 0 AND instr(m.sender, '>') > instr(m.sender, '<') \
+     THEN substr(m.sender, instr(m.sender, '<') + 1, instr(m.sender, '>') - instr(m.sender, '<') - 1) \
+     ELSE m.sender END))";
+
+fn order_by(q: &MessageQuery) -> String {
+    if q.group_by_domain {
+        let domain = format!("substr({SENDER_ADDR_SQL}, instr({SENDER_ADDR_SQL}, '@') + 1)");
+        format!("ORDER BY {domain}, {SENDER_ADDR_SQL}, m.date_ts DESC, m.id DESC")
+    } else {
+        "ORDER BY m.date_ts DESC, m.id DESC".into()
+    }
+}
+
 fn build(q: &MessageQuery) -> (String, Vec<Value>) {
     let mut from = String::from("messages m JOIN folders f ON f.id = m.folder_id");
     let mut conds: Vec<String> = Vec::new();
@@ -186,14 +204,23 @@ impl MailStore {
         let (clause, mut args) = build(q);
         args.push(Value::Integer(limit as i64));
         args.push(Value::Integer(offset as i64));
-        let sql = format!(
-            "SELECT {SELECT_COLS} {clause} ORDER BY m.date_ts DESC, m.id DESC LIMIT ? OFFSET ?"
-        );
+        let sql = format!("SELECT {SELECT_COLS} {clause} {} LIMIT ? OFFSET ?", order_by(q));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_from_iter(args), row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Every message id matching the query, in list order (used for select-all).
+    pub fn query_message_ids(&self, q: &MessageQuery) -> Result<Vec<MessageId>> {
+        let (clause, args) = build(q);
+        let sql = format!("SELECT m.id {clause} {}", order_by(q));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let ids = stmt
+            .query_map(params_from_iter(args), |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     pub fn count_messages(&self, q: &MessageQuery) -> Result<usize> {
@@ -391,7 +418,7 @@ impl MailStore {
 mod tests {
     use super::*;
     use crate::{NewAccount, NewMessage};
-    use mailthin_core::{Condition, Rule, RuleAction};
+    use pigeonmail_core::{Condition, Rule, RuleAction};
     use zeroize::Zeroizing;
 
     fn open() -> (tempfile::TempDir, MailStore) {
@@ -536,6 +563,54 @@ mod tests {
         assert_eq!(store.count_messages(&s).unwrap(), 1);
         s.search = Some("\" OR NEAR( ) * ^".into());
         assert!(store.query_messages(&s, 0, 10).is_ok());
+    }
+
+    #[test]
+    fn group_by_domain_orders_by_domain_then_address() {
+        let (_d, mut store) = open();
+        let fx = fixture(&mut store);
+        let senders = [
+            ("Bob <bob@other.org>", 10),
+            ("Info <info@jobs.com>", 20),
+            ("alert@jobs.com", 30),
+            ("Carol <info@jobs.com>", 40),
+        ];
+        for (i, (sender, ts)) in senders.iter().enumerate() {
+            store
+                .upsert_message(&NewMessage {
+                    account_id: fx.acc1,
+                    folder_id: fx.inbox1,
+                    uid: 100 + i as u32,
+                    msgid: None,
+                    sender,
+                    recipients: "me@example.com",
+                    subject: "grouped",
+                    date_ts: *ts,
+                    flags: 0,
+                    snippet: "",
+                })
+                .unwrap();
+        }
+        let mut q = MessageQuery::new(ListScope::Folder(fx.inbox1));
+        q.group_by_domain = true;
+        let senders: Vec<String> = store
+            .query_messages(&q, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.sender)
+            .collect();
+        assert_eq!(
+            senders,
+            [
+                "alice@example.com",
+                "alice@example.com",
+                "alert@jobs.com",
+                "Carol <info@jobs.com>",
+                "Info <info@jobs.com>",
+                "Bob <bob@other.org>",
+            ]
+        );
+        assert_eq!(store.query_message_ids(&q).unwrap().len(), 6);
     }
 
     #[test]

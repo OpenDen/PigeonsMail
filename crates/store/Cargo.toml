@@ -1,10 +1,10 @@
 [package]
-name = "mailthin-store"
+name = "pigeonmail-store"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-mailthin-core.workspace = true
+pigeonmail-core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

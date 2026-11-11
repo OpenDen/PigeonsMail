@@ -12,6 +12,21 @@ pub fn display_name(sender: &str) -> String {
     }
 }
 
+/// Lower-cased address of a sender, mirroring the store's domain-grouping SQL.
+pub fn sender_address(sender: &str) -> String {
+    let s = sender.trim();
+    let addr = match (s.find('<'), s.find('>')) {
+        (Some(open), Some(close)) if close > open => &s[open + 1..close],
+        _ => s,
+    };
+    addr.trim().to_lowercase()
+}
+
+/// The part of an address after the `@`, or the whole address when there is none.
+pub fn address_domain(addr: &str) -> &str {
+    addr.split_once('@').map_or(addr, |(_, domain)| domain)
+}
+
 /// Up to two letters for an avatar, from the first and last word of a display name.
 pub fn initials(name: &str) -> String {
     let words: Vec<&str> = name
@@ -221,6 +236,14 @@ mod tests {
         assert_eq!(display_name("<bare@example.com>"), "bare@example.com");
         assert_eq!(display_name("plain@example.com, other@x.org"), "plain@example.com");
         assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn sender_address_and_domain_for_grouping() {
+        assert_eq!(sender_address("Info <Info@Jobs.com>"), "info@jobs.com");
+        assert_eq!(sender_address("  bare@Example.org "), "bare@example.org");
+        assert_eq!(address_domain("info@jobs.com"), "jobs.com");
+        assert_eq!(address_domain("nodomain"), "nodomain");
     }
 
     #[test]

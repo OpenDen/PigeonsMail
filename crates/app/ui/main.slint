@@ -65,7 +65,9 @@ export component MainWindow inherits Window {
     in-out property <bool> filter-unread;
     in-out property <bool> filter-starred;
     in-out property <bool> filter-attachments;
-    in-out property <bool> group-by-domain;
+    // 0 = no grouping, 1 = domain groups with sub-groups expanded, 2 = domain groups with sub-groups folded.
+    in-out property <int> group-mode: 0;
+    out property <bool> group-by-domain: root.group-mode > 0;
     in property <int> checked-count: 0;
     callback select-message(int);
     callback close-reader();
@@ -375,46 +377,47 @@ export component MainWindow inherits Window {
                             accepted => { keys.focus(); }
                         }
 
-                        GridLayout {
+                        // All filters and bulk actions share one row of icon-only circles.
+                        HorizontalLayout {
                             spacing: 6px;
+                            alignment: start;
                             NeuChip {
-                                row: 0;
-                                col: 0;
-                                text: "Group By";
-                                active <=> root.group-by-domain;
-                                toggled => { keys.focus(); root.filters-changed(); }
+                                controlled: true;
+                                icon: root.group-mode == 1 ? "indent" : "stack";
+                                tip: root.group-mode == 0 ? "Group by sender domain"
+                                    : root.group-mode == 1 ? "Fold sender address sub-groups"
+                                    : "Turn grouping off";
+                                active: root.group-mode > 0;
+                                toggled => {
+                                    root.group-mode = root.group-mode == 2 ? 0 : root.group-mode + 1;
+                                    keys.focus();
+                                    root.filters-changed();
+                                }
                             }
                             NeuChip {
-                                row: 0;
-                                col: 1;
-                                text: "Unread";
+                                icon: "mail";
+                                tip: "Show unread only";
                                 active <=> root.filter-unread;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
                             NeuChip {
-                                row: 1;
-                                col: 0;
-                                text: "Starred";
+                                icon: "star";
+                                tip: "Show starred only";
                                 active <=> root.filter-starred;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
                             NeuChip {
-                                row: 1;
-                                col: 1;
-                                text: "Attachments";
+                                icon: "attach";
+                                tip: "Show messages with attachments";
                                 active <=> root.filter-attachments;
                                 toggled => { keys.focus(); root.filters-changed(); }
                             }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 6px;
-                            ToolButton { text: "Select all"; tip: "Select every message in this list"; clicked => { root.select-all-matches(); } }
-                            ToolButton { text: "Clear"; tip: "Clear selection"; enabled: root.checked-count > 0; clicked => { root.clear-checked(); } }
+                            ToolButton { compact: true; icon: "select-all"; tip: "Select every message in this list"; clicked => { root.select-all-matches(); } }
+                            ToolButton { compact: true; icon: "clear"; tip: "Clear selection"; enabled: root.checked-count > 0; clicked => { root.clear-checked(); } }
                             ToolButton {
-                                text: root.checked-count > 0 ? "Delete \{root.checked-count}" : "Delete";
+                                compact: true;
                                 icon: "trash";
-                                tip: "Move the selected messages to Trash";
+                                tip: root.checked-count > 0 ? "Move the \{root.checked-count} selected messages to Trash" : "Move the selected messages to Trash";
                                 danger: true;
                                 enabled: root.checked-count > 0;
                                 clicked => { root.delete-selected(); }
@@ -509,7 +512,7 @@ export component MainWindow inherits Window {
                                     padding: 8px;
                                     padding-left: 52px;
                                     padding-right: 14px;
-                                    spacing: 2px;
+                                    spacing: 6px;
                                     HorizontalLayout {
                                         spacing: 6px;
                                         if m.unread: Rectangle {

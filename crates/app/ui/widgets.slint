@@ -46,7 +46,10 @@ export component MailIcon inherits Rectangle {
         if (n == "close") { return "M6 6 L18 18 M18 6 L6 18"; }
         if (n == "plus") { return "M12 5 L12 19 M5 12 L19 12"; }
         if (n == "check") { return "M5 12.5 L10 17 L19 7"; }
+        if (n == "indent") { return "M3 6 L21 6 M9 12 L21 12 M9 18 L21 18 M3 9.5 L6 12 L3 14.5"; }
         if (n == "menu") { return "M4 6 L20 6 M4 12 L20 12 M4 18 L20 18"; }
+        if (n == "select-all") { return "M2 12.5 L6 16.5 L13 8.5 M11 12.5 L15 16.5 L22 8.5"; }
+        if (n == "clear") { return "M4 4 L20 4 L20 20 L4 20 Z M8.5 8.5 L15.5 15.5 M15.5 8.5 L8.5 15.5"; }
         return "";
     }
 
@@ -233,11 +236,11 @@ export component ToolButton inherits Rectangle {
 
         // Layouts pin fixed-height children to the top, so the icon sits in a full-height slot and centers itself.
         if root.icon != "": Rectangle {
-            width: 15px;
+            width: root.compact ? 20px : 15px;
             MailIcon {
                 name: root.icon;
-                width: 15px;
-                height: 15px;
+                width: root.compact ? 20px : 15px;
+                height: self.width;
                 y: (parent.height - self.height) / 2;
                 tint: root.primary ? Theme.accent-ink
                     : root.danger ? Theme.danger
@@ -263,15 +266,18 @@ export component ToolButton inherits Rectangle {
 }
 
 
-// Toggle pill for filters and tabs: raised when off, neon-outlined when on.
+// Icon-only toggle for filters: a raised circle when off, neon-outlined when on. The tip names it.
 export component NeuChip inherits Rectangle {
-    in property <string> text;
+    in property <string> icon;
+    in property <string> tip;
+    // When controlled, the parent owns `active` (for example a multi-state button) and a click only emits `toggled`.
+    in property <bool> controlled: false;
     in-out property <bool> active;
     callback toggled;
 
-    height: 30px;
-    min-width: label.preferred-width + 22px;
-    border-radius: 15px;
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
     background: root.active ? Theme.accent-soft : Theme.surface;
     border-width: root.active ? 1.5px : 1px;
     border-color: root.active ? Theme.accent : Theme.shadow-light.transparentize(Theme.dark ? 0.3 : 0.0);
@@ -281,17 +287,20 @@ export component NeuChip inherits Rectangle {
     drop-shadow-color: root.active ? Theme.accent-glow : Theme.shadow-dark.transparentize(0.4);
     animate background { duration: 120ms; }
 
-    label := Text {
-        text: root.text;
-        font-size: 12px;
-        font-weight: root.active ? 600 : 400;
-        color: root.active ? Theme.accent : Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    MailIcon {
+        name: root.icon;
+        width: 16px;
+        height: 16px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        tint: root.active ? Theme.accent : Theme.text;
     }
-    TouchArea {
+    Tip { x: (root.width - self.width) / 2; y: root.height + 6px; text: root.tip; active: area.has-hover; }
+    area := TouchArea {
         clicked => {
-            root.active = !root.active;
+            if (!root.controlled) {
+                root.active = !root.active;
+            }
             root.toggled();
         }
     }

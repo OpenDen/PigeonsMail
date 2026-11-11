@@ -613,6 +613,7 @@ impl App {
     /// Re-runs the current query (after a folder, filter or search change).
     fn apply_query(&self) {
         let Some(ui) = self.ui() else { return };
+        self.model.set_sub_expanded(ui.get_group_mode() == 1);
         self.model.set_query(Self::current_query(&ui));
         ui.set_message_count(self.model.len() as i32);
         ui.set_checked_count(0);

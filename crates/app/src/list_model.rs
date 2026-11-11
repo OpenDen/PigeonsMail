@@ -28,6 +28,8 @@ pub struct MessageListModel {
     checked: RefCell<HashSet<MessageId>>,
     /// Collapsed domain groups and sub-groups (domains and full addresses, lower-cased).
     collapsed: RefCell<HashSet<String>>,
+    /// Whether address sub-groups start expanded inside domain groups (Group By state 1); otherwise they start folded.
+    sub_expanded: Cell<bool>,
     notify: ModelNotify,
 }
 
@@ -40,6 +42,7 @@ impl MessageListModel {
             pages: RefCell::new(Vec::new()),
             checked: RefCell::new(HashSet::new()),
             collapsed: RefCell::new(HashSet::new()),
+            sub_expanded: Cell::new(false),
             notify: ModelNotify::default(),
         });
         m.recount();
@@ -60,6 +63,11 @@ impl MessageListModel {
         *self.query.borrow_mut() = query;
         self.checked.borrow_mut().clear();
         self.reload();
+    }
+
+    /// Sets whether sub-groups start expanded; takes effect on the next reload (call before `set_query`).
+    pub fn set_sub_expanded(&self, on: bool) {
+        self.sub_expanded.set(on);
     }
 
     pub fn query(&self) -> MessageQuery {
@@ -180,6 +188,7 @@ pub fn to_item(
     r: &MessageRow,
     now_ts: i64,
     grouped: bool,
+    sub_expanded: bool,
     checked: bool,
     collapsed: &HashSet<String>,
 ) -> MessageItem {
@@ -193,7 +202,8 @@ pub fn to_item(
         (date_group(r.date_ts, now_ts).to_string(), String::new())
     };
     let domain_collapsed = grouped && collapsed.contains(&group);
-    let address_collapsed = grouped && collapsed.contains(&sub_group);
+    // Sub-groups start folded unless expanded; a click on a sub-group header flips its state.
+    let address_collapsed = grouped && (!sub_expanded) != collapsed.contains(&sub_group);
     MessageItem {
         id: r.id as i32,
         initials: initials(&name).into(),
@@ -221,9 +231,10 @@ impl Model for MessageListModel {
 
     fn row_data(&self, row: usize) -> Option<MessageItem> {
         let grouped = self.query.borrow().group_by_domain;
+        let sub_expanded = self.sub_expanded.get();
         self.row_at(row).map(|r| {
             let checked = self.checked.borrow().contains(&r.id);
-            to_item(&r, crate::sync_bridge::now_ts(), grouped, checked, &self.collapsed.borrow())
+            to_item(&r, crate::sync_bridge::now_ts(), grouped, sub_expanded, checked, &self.collapsed.borrow())
         })
     }
 
@@ -265,6 +276,26 @@ mod tests {
                 .unwrap();
         }
         (dir, Rc::new(RefCell::new(store)))
+    }
+
+    #[test]
+    fn sub_groups_start_folded_and_expand_with_the_group_by_state() {
+        let (_d, store) = store_with(3);
+        let mut query = MessageQuery::new(ListScope::UnifiedInbox);
+        query.group_by_domain = true;
+        let model = MessageListModel::new(store, query);
+
+        let row = model.row_data(0).unwrap();
+        assert_eq!(row.group.as_str(), "x.org");
+        assert_eq!(row.sub_group.as_str(), "a@x.org");
+        assert!(!row.domain_collapsed);
+        assert!(row.address_collapsed);
+
+        model.set_sub_expanded(true);
+        assert!(!model.row_data(0).unwrap().address_collapsed);
+
+        model.toggle_collapsed("a@x.org");
+        assert!(model.row_data(0).unwrap().address_collapsed);
     }
 
     #[test]

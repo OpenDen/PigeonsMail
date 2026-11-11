@@ -6,6 +6,7 @@ pub mod compose;
 pub mod format;
 pub mod image_cache;
 pub mod list_model;
+pub mod memory;
 pub mod sync_bridge;
 
 pub use app::run;

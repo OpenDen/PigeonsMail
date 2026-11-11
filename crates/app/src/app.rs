@@ -49,6 +49,7 @@ use crate::format::{
 };
 use crate::image_cache::{self, ImageCache};
 use crate::list_model::MessageListModel;
+use crate::memory;
 use crate::sync_bridge::{now_ts, spawn_store_writer, ServerAction};
 use crate::{
     AttachmentChip, ComposeAttachment, MainWindow, ManageLabel, ManageRule, MessageItem,
@@ -57,6 +58,9 @@ use crate::{
 
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+/// Delay before trimming, so Slint has dropped the closed message's textures first.
+const TRIM_AFTER_CLOSE: Duration = Duration::from_millis(500);
+const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(120);
 const SYNC_WINDOW_DAYS: i64 = 30;
 /// Maximum total encoded remote image bytes loaded for one message.
 const MAX_REMOTE_BYTES: usize = 16 * 1024 * 1024;
@@ -393,7 +397,13 @@ struct App {
     next_remote_request: u64,
     /// On-disk cache of remote images, or `None` if the cache directory could not be created.
     image_cache: Option<ImageCache>,
-    resize_timer: Timer,    /// Hosts last filled in from the typed address, so they can be replaced when the address changes.
+    /// Returns memory to the OS shortly after a message is closed.
+    trim_timer: Timer,
+    /// Periodic trim so idle memory is reclaimed even while a message stays open. Held here so
+    /// the timer keeps running.
+    _idle_trim_timer: Timer,
+    resize_timer: Timer,
+    /// Hosts last filled in from the typed address, so they can be replaced when the address changes.
     auto_hosts: Option<ServerDefaults>,
     /// The account being tested by a login attempt from the add dialog.
     pending_add: Option<PendingAdd>,
@@ -1098,6 +1108,8 @@ impl App {
         }
         self.reader = None;
         self.link_hover = false;
+        self.trim_timer
+            .start(TimerMode::SingleShot, TRIM_AFTER_CLOSE, memory::release_unused_memory);
         let Some(ui) = self.ui() else { return };
         ui.set_has_message(false);
         ui.set_selected_message(-1);
@@ -2419,6 +2431,8 @@ pub fn run() -> Result<()> {
     if let Some(cache) = image_cache.as_ref() {
         cache.sweep();
     }
+    let idle_trim_timer = Timer::default();
+    idle_trim_timer.start(TimerMode::Repeated, IDLE_TRIM_INTERVAL, memory::release_unused_memory);
     let db_path = db_path.to_string_lossy().into_owned();
     let key = keystore::get_or_create_db_key()?;
 
@@ -2480,6 +2494,8 @@ pub fn run() -> Result<()> {
             next_remote_request: 0,
             image_cache,
             resize_timer: Timer::default(),
+            trim_timer: Timer::default(),
+            _idle_trim_timer: idle_trim_timer,
             auto_hosts: None,
             pending_add: None,
             compose: None,

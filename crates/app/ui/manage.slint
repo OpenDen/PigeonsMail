@@ -44,6 +44,7 @@ export component ManageDialog inherits Rectangle {
     callback apply-label();
     callback delete-label();
     callback save-servers();
+    callback remove-account();
 
     background: Theme.scrim;
     TouchArea { }
@@ -163,6 +164,7 @@ export component ManageDialog inherits Rectangle {
                 Text { text: "SMTP host (STARTTLS on port 587)"; color: Theme.text-dim; font-size: 12px; }
                 NeuField { text <=> root.smtp-host; placeholder-text: "smtp.example.com"; }
                 ToolButton { text: "Save and reconnect"; tip: "Save server settings and reconnect accounts"; clicked => { root.save-servers(); } }
+                ToolButton { text: "Remove account"; icon: "close"; danger: true; tip: "Remove this account and its synced mail from this device"; clicked => { root.remove-account(); } }
             }
 
             if root.error != "": Text { text: root.error; color: Theme.danger; font-size: 12px; wrap: word-wrap; }

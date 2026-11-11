@@ -1,6 +1,6 @@
 import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { AccentSwatch, Avatar, MailIcon, NeuCard, NeuChip, NeuField, NeuSelect, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
+import { AccentSwatch, Avatar, MailIcon, NeuCard, NeuChip, NeuField, NeuSelect, NeuSwitch, Tip, TitleIconButton, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -134,6 +134,7 @@ export component MainWindow inherits Window {
     in-out property <bool> show-manage: false;
     callback manage-open();
     in property <string> manage-account;
+    in property <int> manage-account-id: -1;
     in property <string> manage-error;
     in property <[ManageRule]> manage-rules;
     in property <[ManageLabel]> manage-labels;
@@ -174,6 +175,9 @@ export component MainWindow inherits Window {
     callback email-edited(string);
 
     in-out property <bool> show-remove-account: false;
+    in-out property <string> folder-tip;
+    in-out property <length> folder-tip-y: 0px;
+    in-out property <bool> folder-tip-active: false;
     in-out property <int> remove-account-id: -1;
     in-out property <string> remove-account-email;
     callback remove-account(int);
@@ -262,6 +266,7 @@ export component MainWindow inherits Window {
                         TitleIconButton { icon: "compose"; tip: "New message (c)"; clicked => { root.compose-new(); } }
                         TitleIconButton { icon: "settings"; tip: "Manage rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
                         TitleIconButton { icon: "sync"; tip: "Sync now"; clicked => { root.refresh(); } }
+                        TitleIconButton { icon: "plus"; tip: "Connect another mail account"; clicked => { root.show-add-account = true; } }
                     }
                 }
 
@@ -272,7 +277,7 @@ export component MainWindow inherits Window {
                 padding: 10px;
 
                 // ---------------- Sidebar ----------------
-                NeuCard {
+                sidebar-card := NeuCard {
                     width: root.sidebar-open ? 220px : 56px;
 
                     VerticalLayout {
@@ -284,20 +289,8 @@ export component MainWindow inherits Window {
                             current: root.inbox-index;
                             selected(i) => { keys.focus(); root.select-inbox(i); }
                         }
-                        if root.sidebar-open && root.inbox-index > 0: ToolButton {
-                            text: "Remove account";
-                            icon: "close";
-                            danger: true;
-                            tip: "Remove this account and its mail";
-                            clicked => {
-                                root.remove-account-id = root.inbox-ids[root.inbox-index];
-                                root.remove-account-email = root.inbox-names[root.inbox-index];
-                                root.show-remove-account = true;
-                            }
-                        }
-
                         ListView {
-                            for item in root.sidebar: Rectangle {
+                            for item in root.sidebar: row := Rectangle {
                                 width: root.sidebar-open ? 176px : 36px;
                                 height: 34px;
                                 border-radius: 10px;
@@ -335,7 +328,12 @@ export component MainWindow inherits Window {
                                         horizontal-alignment: right;
                                     }
                                 }
-                                TouchArea {
+                                area := TouchArea {
+                                    changed has-hover => {
+                                        root.folder-tip-active = self.has-hover;
+                                        root.folder-tip = item.title;
+                                        root.folder-tip-y = row.absolute-position.y;
+                                    }
                                     clicked => {
                                         keys.focus();
                                         root.select-folder(item.folder-id);
@@ -347,16 +345,6 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 8px;
 
-                            ToolButton { compact: !root.sidebar-open; text: "Refresh";  icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
-                            ToolButton { compact: !root.sidebar-open; text: "Compose"; icon: "compose"; tip: "New message (c)"; primary: true; clicked => { root.compose-new(); } }
-                            ToolButton { compact: !root.sidebar-open; text: "Manage"; icon: "settings"; tip: "Rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
-                            ToolButton {
-                                compact: !root.sidebar-open;
-                                text: "Add Account";
-                                icon: "plus";
-                                tip: "Connect another mail account";
-                                clicked => { root.show-add-account = true; }
-                            }
                             ToolButton { compact: !root.sidebar-open; text: "Calendar"; icon: "layout"; tip: "Calendar arrives in Phase 2"; enabled: false; }
                         }
                     }
@@ -773,47 +761,12 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ---------------- Remove account confirmation ----------------
-    if root.show-remove-account: Rectangle {
-        background: Theme.scrim;
-        TouchArea { }
-
-        Rectangle {
-            width: 380px;
-            height: 200px;
-            border-radius: 14px;
-            background: Theme.surface;
-
-            VerticalLayout {
-                padding: 20px;
-                spacing: 10px;
-
-                Text { text: "Remove account?"; font-size: 18px; font-weight: 700; color: Theme.text; }
-                Text {
-                    text: "\{root.remove-account-email} and its synced mail will be deleted from this device. Mail on the server is not affected.";
-                    font-size: 12px;
-                    color: Theme.text-dim;
-                    wrap: word-wrap;
-                }
-                Rectangle { vertical-stretch: 1; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-                    ToolButton {
-                        text: "Cancel";
-                        clicked => { root.show-remove-account = false; keys.focus(); }
-                    }
-                    ToolButton {
-                        text: "Remove";
-                        clicked => {
-                            root.show-remove-account = false;
-                            root.remove-account(root.remove-account-id);
-                            keys.focus();
-                        }
-                    }
-                }
-            }
-        }
+    // Collapsed-sidebar label tooltip. One popup at window level, since popups cannot be repeated.
+    Tip {
+        x: sidebar-card.absolute-position.x + sidebar-card.width + 8px;
+        y: root.folder-tip-y + 5px;
+        text: root.folder-tip;
+        active: root.folder-tip-active && !root.sidebar-open;
     }
 
     // ---------------- Compose dialog ----------------
@@ -872,6 +825,55 @@ export component MainWindow inherits Window {
         apply-label => { root.apply-label(); }
         delete-label => { root.delete-label(); }
         save-servers => { root.save-servers(); }
+        remove-account => {
+            root.remove-account-id = root.manage-account-id;
+            root.remove-account-email = root.manage-account;
+            root.show-remove-account = true;
+        }
+    }
+
+    // ---------------- Remove account confirmation (above Manage) ----------------
+    if root.show-remove-account: Rectangle {
+        background: Theme.scrim;
+        TouchArea { }
+
+        Rectangle {
+            width: 380px;
+            height: 200px;
+            border-radius: 14px;
+            background: Theme.surface;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                Text { text: "Remove account?"; font-size: 18px; font-weight: 700; color: Theme.text; }
+                Text {
+                    text: "\{root.remove-account-email} and its synced mail will be deleted from this device. Mail on the server is not affected.";
+                    font-size: 12px;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    ToolButton {
+                        text: "Cancel";
+                        clicked => { root.show-remove-account = false; keys.focus(); }
+                    }
+                    ToolButton {
+                        text: "Remove";
+                        danger: true;
+                        clicked => {
+                            root.show-remove-account = false;
+                            root.remove-account(root.remove-account-id);
+                            keys.focus();
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------------- Add account dialog ----------------

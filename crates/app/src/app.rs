@@ -565,6 +565,10 @@ impl App {
         let _ = keystore::delete_account_secret(&row.email);
         self.statuses.remove(&row.id);
         self.pending_fetches.retain(|(id, _, _)| *id != row.id);
+        if self.manage_account_id == Some(row.id) {
+            self.manage_account_id = None;
+            ui.set_show_manage(false);
+        }
         ui.set_inbox_index(0);
         self.refresh_sidebar();
         self.select_folder(0);
@@ -712,6 +716,7 @@ impl App {
             .map_or(-1, |i| i as i32);
         ui.set_manage_accounts(ModelRc::new(VecModel::from(account_emails)));
         ui.set_manage_account_index(account_index);
+        ui.set_manage_account_id(account_id as i32);
         ui.set_manage_account(account.email.as_str().into());
         ui.set_manage_rules(ModelRc::new(VecModel::from(rule_items)));
         ui.set_manage_labels(ModelRc::new(VecModel::from(label_items)));
@@ -1271,8 +1276,24 @@ impl App {
         ui.set_attachments(ModelRc::new(VecModel::from(chips)));
 
         match EmailView::new(&parsed, w, h, scale) {
-            Ok(view) => {
+            Ok(mut view) => {
                 ui.set_reader_error("".into());
+                let mut cached = Vec::new();
+                if let Some(cache) = self.image_cache.as_ref() {
+                    let mut budget = MAX_REMOTE_BYTES.saturating_sub(reader.remote_bytes);
+                    for url in view.unloaded_remote_images() {
+                        if let Some(data) = cache.get(url) {
+                            if data.len() <= budget {
+                                budget -= data.len();
+                                reader.remote_bytes += data.len();
+                                cached.push((url.clone(), data));
+                            }
+                        }
+                    }
+                }
+                if !cached.is_empty() {
+                    view.load_remote_images(cached);
+                }
                 reader.view = Some(view);
             }
             Err(e) => ui.set_reader_error(format!("{e:#}").into()),

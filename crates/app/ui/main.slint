@@ -1,6 +1,6 @@
 import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { AccentSwatch, Avatar, MailIcon, NeuCard, NeuChip, NeuField, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
+import { AccentSwatch, Avatar, MailIcon, NeuCard, NeuChip, NeuField, NeuSelect, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -46,8 +46,13 @@ export component MainWindow inherits Window {
     // Sidebar
     in property <[SidebarItem]> sidebar;
     in-out property <int> selected-folder: -1;
+    // Inbox selector: index 0 is the unified inbox, then one entry per account.
+    in property <[string]> inbox-names;
+    in property <[int]> inbox-ids;
+    in-out property <int> inbox-index: 0;
+    in-out property <bool> sidebar-open: true;
     callback select-folder(int);
-    callback toggle-account(int);
+    callback select-inbox(int);
 
     // Message list
     in property <[MessageItem]> messages;
@@ -240,12 +245,23 @@ export component MainWindow inherits Window {
                             color: Theme.text;
                             vertical-alignment: center;
                         }
+                        TitleIconButton { icon: "menu"; tip: root.sidebar-open ? "Hide folders panel" : "Show folders panel"; clicked => { root.sidebar-open = !root.sidebar-open; } }
                         Rectangle { horizontal-stretch: 1; }
+                        AccentSwatch { swatch: Theme.accent-palette[0]; selected: Theme.accent-index == 0; clicked => { Theme.accent-index = 0; } }
+                        AccentSwatch { swatch: Theme.accent-palette[1]; selected: Theme.accent-index == 1; clicked => { Theme.accent-index = 1; } }
+                        AccentSwatch { swatch: Theme.accent-palette[2]; selected: Theme.accent-index == 2; clicked => { Theme.accent-index = 2; } }
+                        AccentSwatch { swatch: Theme.accent-palette[3]; selected: Theme.accent-index == 3; clicked => { Theme.accent-index = 3; } }
+                        NeuSwitch {
+                            checked: Theme.dark;
+                            toggled => {
+                                Theme.dark = !Theme.dark;
+                                Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+                            }
+                        }
+                        Rectangle { width: 6px; }
                         TitleIconButton { icon: "compose"; tip: "New message (c)"; clicked => { root.compose-new(); } }
                         TitleIconButton { icon: "settings"; tip: "Manage rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
-                        TitleIconButton { icon: "theme"; tip: "Switch light / dark theme"; clicked => { Theme.dark = !Theme.dark; Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; } }
                         TitleIconButton { icon: "sync"; tip: "Sync now"; clicked => { root.refresh(); } }
-                        TitleIconButton { icon: "layout"; tip: "Calendar (Phase 2)"; enabled: false; }
                     }
                 }
 
@@ -257,54 +273,41 @@ export component MainWindow inherits Window {
 
                 // ---------------- Sidebar ----------------
                 NeuCard {
-                    width: 220px;
+                    width: root.sidebar-open ? 220px : 56px;
 
                     VerticalLayout {
                         padding: 10px;
                         spacing: 8px;
 
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: space-between;
-                            HorizontalLayout {
-                                spacing: 6px;
-                                AccentSwatch { swatch: Theme.accent-palette[0]; selected: Theme.accent-index == 0; clicked => { Theme.accent-index = 0; } }
-                                AccentSwatch { swatch: Theme.accent-palette[1]; selected: Theme.accent-index == 1; clicked => { Theme.accent-index = 1; } }
-                                AccentSwatch { swatch: Theme.accent-palette[2]; selected: Theme.accent-index == 2; clicked => { Theme.accent-index = 2; } }
-                                AccentSwatch { swatch: Theme.accent-palette[3]; selected: Theme.accent-index == 3; clicked => { Theme.accent-index = 3; } }
-                            }
-                            NeuSwitch {
-                                checked: Theme.dark;
-                                toggled => {
-                                    Theme.dark = !Theme.dark;
-                                    Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
-                                }
+                        if root.sidebar-open: NeuSelect {
+                            options: root.inbox-names;
+                            current: root.inbox-index;
+                            selected(i) => { keys.focus(); root.select-inbox(i); }
+                        }
+                        if root.sidebar-open && root.inbox-index > 0: ToolButton {
+                            text: "Remove account";
+                            icon: "close";
+                            danger: true;
+                            tip: "Remove this account and its mail";
+                            clicked => {
+                                root.remove-account-id = root.inbox-ids[root.inbox-index];
+                                root.remove-account-email = root.inbox-names[root.inbox-index];
+                                root.show-remove-account = true;
                             }
                         }
 
                         ListView {
                             for item in root.sidebar: Rectangle {
-                                width: 176px;
+                                width: root.sidebar-open ? 176px : 36px;
                                 height: 34px;
                                 border-radius: 10px;
-                                background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
-                                border-width: item.kind != 1 && root.selected-folder == item.folder-id ? 1.5px : 0px;
+                                background: root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
+                                border-width: root.selected-folder == item.folder-id ? 1.5px : 0px;
                                 border-color: Theme.accent;
 
-                                // Right-click on an account row asks to remove it.
-                                if item.kind == 1: TouchArea {
-                                    pointer-event(e) => {
-                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
-                                            root.remove-account-id = item.account-id;
-                                            root.remove-account-email = item.title;
-                                            root.show-remove-account = true;
-                                        }
-                                    }
-                                }
-
                                 HorizontalLayout {
-                                    padding-left: (item.kind == 2 || item.kind == 3) ? 18px : 8px;
-                                    padding-right: 8px;
+                                    padding-left: root.sidebar-open ? ((item.kind == 2 || item.kind == 3) ? 18px : 8px) : 10px;
+                                    padding-right: root.sidebar-open ? 8px : 0px;
                                     spacing: 6px;
                                     Rectangle {
                                         width: 15px;
@@ -313,43 +316,26 @@ export component MainWindow inherits Window {
                                             width: 15px;
                                             height: 15px;
                                             y: (parent.height - self.height) / 2;
-                                            tint: root.selected-folder == item.folder-id && item.kind != 1 ? Theme.accent : Theme.text-dim;
+                                            tint: root.selected-folder == item.folder-id ? Theme.accent : Theme.text-dim;
                                         }
                                     }
-                                    Text {
+                                    if root.sidebar-open: Text {
                                         text: item.title;
-                                        font-size: item.kind == 1 ? 14px : 13px;
-                                        font-weight: (item.kind == 0 || item.kind == 1) ? 700 : 400;
-                                        color: item.kind == 1 ? Theme.text : (root.selected-folder == item.folder-id ? Theme.accent : Theme.text);
+                                        font-size: 13px;
+                                        font-weight: item.kind == 0 ? 700 : 400;
+                                        color: root.selected-folder == item.folder-id ? Theme.accent : Theme.text;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
-                                    if item.unread > 0: Text {
+                                    if root.sidebar-open && item.unread > 0: Text {
                                         text: item.unread;
                                         font-size: 11px;
                                         color: Theme.accent;
                                         vertical-alignment: center;
                                         horizontal-alignment: right;
                                     }
-                                    if item.kind == 1: Rectangle {
-                                        width: 24px;
-                                        height: 24px;
-                                        border-radius: 12px;
-                                        background: chevron-area.has-hover ? Theme.well : transparent;
-                                        MailIcon {
-                                            name: item.expanded ? "chevron-down" : "chevron-right";
-                                            width: 14px;
-                                            height: 14px;
-                                            x: 5px;
-                                            y: 5px;
-                                            tint: Theme.text-dim;
-                                        }
-                                        chevron-area := TouchArea {
-                                            clicked => { root.toggle-account(item.account-id); }
-                                        }
-                                    }
                                 }
-                                if item.kind != 1: TouchArea {
+                                TouchArea {
                                     clicked => {
                                         keys.focus();
                                         root.select-folder(item.folder-id);
@@ -361,16 +347,17 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 8px;
 
-                            ToolButton { text: "Refresh";  icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
-                            ToolButton { text: "Compose"; icon: "compose"; tip: "New message (c)"; primary: true; clicked => { root.compose-new(); } }
-                            ToolButton { text: "Manage"; icon: "settings"; tip: "Rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
+                            ToolButton { compact: !root.sidebar-open; text: "Refresh";  icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
+                            ToolButton { compact: !root.sidebar-open; text: "Compose"; icon: "compose"; tip: "New message (c)"; primary: true; clicked => { root.compose-new(); } }
+                            ToolButton { compact: !root.sidebar-open; text: "Manage"; icon: "settings"; tip: "Rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
                             ToolButton {
+                                compact: !root.sidebar-open;
                                 text: "Add Account";
                                 icon: "plus";
                                 tip: "Connect another mail account";
                                 clicked => { root.show-add-account = true; }
                             }
-                            ToolButton { text: "Calendar"; icon: "layout"; tip: "Calendar arrives in Phase 2"; enabled: false; }
+                            ToolButton { compact: !root.sidebar-open; text: "Calendar"; icon: "layout"; tip: "Calendar arrives in Phase 2"; enabled: false; }
                         }
                     }
                 }
@@ -538,8 +525,8 @@ export component MainWindow inherits Window {
                     }
 
                     if root.has-message: VerticalLayout {
-                        padding: 12px;
-                        spacing: 8px;
+                        padding: 14px;
+                        spacing: 12px;
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -591,7 +578,7 @@ export component MainWindow inherits Window {
                                 tint: root.msg-avatar;
                             }
                             VerticalLayout {
-                                spacing: 2px;
+                                spacing: 4px;
                                 alignment: center;
                                 Text {
                                     text: root.msg-from;

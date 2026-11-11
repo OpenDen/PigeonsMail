@@ -35,8 +35,8 @@ use mailthin_store::{
     keystore, AccountRow, ListScope, MailStore, MessageLocation, MessageQuery, NewAccount,
 };
 use slint::{
-    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
-    VecModel,
+    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
+    TimerMode, VecModel,
 };
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -414,8 +414,6 @@ struct App {
     last_sent_draft: Option<Draft>,
     compose_attachments: Vec<(String, String, Vec<u8>)>,
     manage_account_id: Option<AccountId>,
-    /// Accounts whose folder list is collapsed in the sidebar.
-    collapsed_accounts: HashSet<AccountId>,
     self_ref: RcWeak<RefCell<App>>,
 }
 
@@ -468,30 +466,33 @@ impl App {
                 s.unified_inbox_unread().unwrap_or(0),
             )
         };
-        let mut items = vec![SidebarItem {
-            kind: 0,
-            title: "Unified Inbox".into(),
-            unread: unified as i32,
-            folder_id: 0,
-            account_id: -1,
-            expanded: false,
-            icon: "stack".into(),
-        }];
+
+        // Index 0 is the unified inbox; index n maps to accounts[n - 1].
+        let mut names: Vec<SharedString> = vec!["Unified Inbox".into()];
+        let mut ids: Vec<i32> = vec![-1];
         for acc in &accounts {
-            let expanded = !self.collapsed_accounts.contains(&acc.id);
+            names.push(acc.email.as_str().into());
+            ids.push(acc.id as i32);
+        }
+        let index = ui.get_inbox_index().clamp(0, accounts.len() as i32);
+        ui.set_inbox_index(index);
+        ui.set_inbox_names(ModelRc::new(VecModel::from(names)));
+        ui.set_inbox_ids(ModelRc::new(VecModel::from(ids)));
+
+        let mut items = Vec::new();
+        if index == 0 {
             items.push(SidebarItem {
-                kind: 1,
-                title: acc.email.as_str().into(),
-                unread: 0,
-                folder_id: -1,
-                account_id: acc.id as i32,
-                expanded,
-                icon: "mail".into(),
+                kind: 0,
+                title: "Unified Inbox".into(),
+                unread: unified as i32,
+                folder_id: 0,
+                account_id: -1,
+                expanded: false,
+                icon: "stack".into(),
             });
-            if !expanded {
-                continue;
-            }
-            for f in folders.iter().filter(|f| f.account_id == acc.id) {
+        } else {
+            let account_id = accounts[(index - 1) as usize].id;
+            for f in folders.iter().filter(|f| f.account_id == account_id) {
                 items.push(SidebarItem {
                     kind: 2,
                     title: folder_title(&f.name, f.role.as_deref()).into(),
@@ -517,12 +518,28 @@ impl App {
         ui.set_sidebar(ModelRc::new(VecModel::from(items)));
     }
 
-    fn toggle_account(&mut self, account_id: i32) {
-        let id = account_id as AccountId;
-        if !self.collapsed_accounts.remove(&id) {
-            self.collapsed_accounts.insert(id);
-        }
+    /// Switches the sidebar and message list to the chosen inbox (0 = unified, n = account n - 1).
+    fn select_inbox(&mut self, index: i32) {
+        let Some(ui) = self.ui() else { return };
+        ui.set_inbox_index(index);
         self.refresh_sidebar();
+        let target = if index <= 0 {
+            0
+        } else {
+            let accounts = self.store.borrow().list_accounts().unwrap_or_default();
+            let folders = self.store.borrow().folder_tree().unwrap_or_default();
+            accounts
+                .get((index - 1) as usize)
+                .and_then(|acc| {
+                    let mine: Vec<_> = folders.iter().filter(|f| f.account_id == acc.id).collect();
+                    mine.iter()
+                        .find(|f| f.role.as_deref() == Some("inbox"))
+                        .or(mine.first())
+                        .map(|f| f.id as i32)
+                })
+                .unwrap_or(0)
+        };
+        self.select_folder(target);
     }
 
     /// Removes an account, its synced mail, its keyring password, and stops its sync worker.
@@ -548,6 +565,7 @@ impl App {
         let _ = keystore::delete_account_secret(&row.email);
         self.statuses.remove(&row.id);
         self.pending_fetches.retain(|(id, _, _)| *id != row.id);
+        ui.set_inbox_index(0);
         self.refresh_sidebar();
         self.select_folder(0);
         self.update_status();
@@ -2503,7 +2521,6 @@ pub fn run() -> Result<()> {
             last_sent_draft: None,
             compose_attachments: Vec::new(),
             manage_account_id: None,
-            collapsed_accounts: HashSet::new(),
             self_ref: weak.clone(),
         })
     });
@@ -2666,7 +2683,7 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     }
 
     on!(on_select_folder, |app, id| app.select_folder(id));
-    on!(on_toggle_account, |app, id| app.toggle_account(id));
+    on!(on_select_inbox, |app, index| app.select_inbox(index));
     on!(on_select_message, |app, id| app.open_message(id));
     on!(on_compose_new, |app| app.compose_new());
     on!(on_reply_message, |app| app.reply_to_open(ReplyKind::Reply));

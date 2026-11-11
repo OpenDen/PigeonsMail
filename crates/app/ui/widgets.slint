@@ -46,6 +46,7 @@ export component MailIcon inherits Rectangle {
         if (n == "close") { return "M6 6 L18 18 M18 6 L6 18"; }
         if (n == "plus") { return "M12 5 L12 19 M5 12 L19 12"; }
         if (n == "check") { return "M5 12.5 L10 17 L19 7"; }
+        if (n == "menu") { return "M4 6 L20 6 M4 12 L20 12 M4 18 L20 18"; }
         return "";
     }
 
@@ -195,6 +196,8 @@ export component ToolButton inherits Rectangle {
     in property <bool> active: false;
     in property <bool> primary: false;
     in property <bool> danger: false;
+    // Icon-only pill used when the sidebar is collapsed.
+    in property <bool> compact: false;
     in property <string> icon;
     in property <string> tip;
     callback clicked;
@@ -203,7 +206,8 @@ export component ToolButton inherits Rectangle {
     property <bool> neon: root.primary || (root.active && root.enabled);
 
     height: 36px;
-    min-width: label.preferred-width + 28px + (root.icon != "" ? 21px : 0px);
+    min-width: root.compact ? 36px : label.preferred-width + 28px + (root.icon != "" ? 21px : 0px);
+    max-width: root.compact ? 36px : 10000px;
     border-radius: 18px;
     opacity: root.enabled ? 1 : 0.45;
     background: root.primary ? (area.pressed ? Theme.accent.darker(12%) : Theme.accent)
@@ -222,8 +226,8 @@ export component ToolButton inherits Rectangle {
     animate background { duration: 120ms; }
 
     HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
+        padding-left: root.compact ? 0px : 14px;
+        padding-right: root.compact ? 0px : 14px;
         spacing: 6px;
         alignment: center;
 
@@ -241,7 +245,7 @@ export component ToolButton inherits Rectangle {
             }
         }
         label := Text {
-            text: root.text;
+            text: root.compact ? "" : root.text;
             color: root.primary ? Theme.accent-ink
                 : root.danger ? Theme.danger
                 : root.active ? Theme.accent : Theme.text;

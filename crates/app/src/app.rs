@@ -44,9 +44,10 @@ use zeroize::Zeroizing;
 use crate::actions::{self, Plan};
 use crate::compose::{self as glue, ComposeState, ReplyKind};
 use crate::format::{
-    folder_icon, folder_title, format_full_date, human_size, looks_like_email, provider_defaults,
-    split_host_port, ServerDefaults,
+    display_name, folder_icon, folder_title, format_full_date, human_size, initials, looks_like_email,
+    provider_defaults, split_host_port, ServerDefaults, avatar_rgb,
 };
+use crate::image_cache::{self, ImageCache};
 use crate::list_model::MessageListModel;
 use crate::sync_bridge::{now_ts, spawn_store_writer, ServerAction};
 use crate::{
@@ -390,8 +391,9 @@ struct App {
     /// Body downloads in flight, so a failure can be told apart from a failed mutation.
     pending_fetches: HashSet<(AccountId, String, u32)>,
     next_remote_request: u64,
-    resize_timer: Timer,
-    /// Hosts last filled in from the typed address, so they can be replaced when the address changes.
+    /// On-disk cache of remote images, or `None` if the cache directory could not be created.
+    image_cache: Option<ImageCache>,
+    resize_timer: Timer,    /// Hosts last filled in from the typed address, so they can be replaced when the address changes.
     auto_hosts: Option<ServerDefaults>,
     /// The account being tested by a login attempt from the add dialog.
     pending_add: Option<PendingAdd>,
@@ -1155,8 +1157,13 @@ impl App {
         } else {
             row.subject.as_str().into()
         });
-        ui.set_msg_from(row.sender.as_str().into());
-        ui.set_msg_to(row.recipients.as_str().into());
+        let sender_name = display_name(&row.sender);
+        let (red, green, blue) = avatar_rgb(&sender_name);
+        ui.set_msg_initials(initials(&sender_name).into());
+        ui.set_msg_avatar(slint::Color::from_rgb_u8(red, green, blue));
+        ui.set_msg_from(sender_name.into());
+        let folder = folder_title(&loc.folder, None);
+        ui.set_msg_inbox(format!("{} · {folder}", self.account_email(loc.account_id)).into());
         ui.set_msg_date(format_full_date(row.date_ts).into());
         ui.set_msg_starred(row.is_starred());
         self.update_message_labels(id);
@@ -1435,9 +1442,27 @@ impl App {
         self.next_remote_request = self.next_remote_request.wrapping_add(1);
         let request = self.next_remote_request;
         let tx = self.ui_tx.clone();
+        let cache = self.image_cache.clone();
         let task = self.rt.spawn(async move {
             let mut downloads = futures::stream::iter(urls)
-                .map(|u| async move { fetch_remote_image(&u).await.map(|data| (u, data)) })
+                .map(|u| {
+                    let cache = cache.clone();
+                    async move {
+                        if let Some(cache) = cache.as_ref() {
+                            if let Some(data) = cache.get(&u) {
+                                return Ok((u, data));
+                            }
+                        }
+                        let data = fetch_remote_image(&u).await?;
+                        let data = tokio::task::spawn_blocking(move || image_cache::downscale(data))
+                            .await
+                            .unwrap_or_default();
+                        if let Some(cache) = cache.as_ref() {
+                            cache.put(&u, &data);
+                        }
+                        Ok::<_, anyhow::Error>((u, data))
+                    }
+                })
                 .buffer_unordered(4);
             let mut batch = RemoteImageBatch::new(remaining);
             while let Some(result) = downloads.next().await {
@@ -2388,7 +2413,12 @@ fn data_dir() -> Result<PathBuf> {
 }
 
 pub fn run() -> Result<()> {
-    let db_path = data_dir()?.join("mail.db");
+    let data_dir = data_dir()?;
+    let db_path = data_dir.join("mail.db");
+    let image_cache = ImageCache::open(&data_dir).ok();
+    if let Some(cache) = image_cache.as_ref() {
+        cache.sweep();
+    }
     let db_path = db_path.to_string_lossy().into_owned();
     let key = keystore::get_or_create_db_key()?;
 
@@ -2448,6 +2478,7 @@ pub fn run() -> Result<()> {
             link_hover: false,
             pending_fetches: HashSet::new(),
             next_remote_request: 0,
+            image_cache,
             resize_timer: Timer::default(),
             auto_hosts: None,
             pending_add: None,
@@ -2662,6 +2693,7 @@ fn wire_callbacks(ui: &MainWindow, shared: &Shared) {
     on!(on_body_clicked, |app, x, y| app.on_clicked(x, y));
     on!(on_copy_selection, |app| app.copy_selection());
     on!(on_toggle_remote, |app| app.load_remote_images());
+    on!(on_close_reader, |app| app.close_reader());
     on!(on_open_link, |app| app.open_pending_link());
     on!(on_dismiss_link, |app| app.dismiss_link());
     on!(on_star, |app| app.toggle_star());

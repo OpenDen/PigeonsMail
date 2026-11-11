@@ -6,7 +6,7 @@ use std::rc::Rc;
 use mailthin_store::{MailStore, MessageQuery, MessageRow};
 use slint::{Model, ModelNotify, ModelTracker};
 
-use crate::format::{date_group, display_name, format_list_date};
+use crate::format::{avatar_rgb, date_group, display_name, format_list_date, initials};
 use crate::MessageItem;
 
 pub const PAGE_SIZE: usize = 50;
@@ -122,9 +122,13 @@ impl MessageListModel {
 }
 
 pub fn to_item(r: &MessageRow, now_ts: i64) -> MessageItem {
+    let name = display_name(&r.sender);
+    let (red, green, blue) = avatar_rgb(&name);
     MessageItem {
         id: r.id as i32,
-        sender: display_name(&r.sender).into(),
+        initials: initials(&name).into(),
+        avatar: slint::Color::from_rgb_u8(red, green, blue),
+        sender: name.into(),
         subject: if r.subject.is_empty() { "(no subject)".into() } else { r.subject.as_str().into() },
         snippet: r.snippet.as_str().into(),
         date: format_list_date(r.date_ts, now_ts).into(),

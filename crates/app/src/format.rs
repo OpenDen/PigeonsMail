@@ -12,6 +12,37 @@ pub fn display_name(sender: &str) -> String {
     }
 }
 
+/// Up to two letters for an avatar, from the first and last word of a display name.
+pub fn initials(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split_whitespace()
+        .filter(|w| w.chars().next().is_some_and(char::is_alphanumeric))
+        .collect();
+    let letters: String = match words.as_slice() {
+        [] => return "?".to_string(),
+        [only] => only.chars().take(2).collect(),
+        [first, .., last] => first.chars().next().into_iter().chain(last.chars().next()).collect(),
+    };
+    letters.to_uppercase()
+}
+
+const AVATAR_PALETTE: [(u8, u8, u8); 8] = [
+    (0x25, 0x63, 0xEB),
+    (0x0D, 0x94, 0x88),
+    (0x7C, 0x3A, 0xED),
+    (0xDB, 0x27, 0x77),
+    (0xDC, 0x26, 0x26),
+    (0xEA, 0x58, 0x0C),
+    (0x0E, 0x74, 0x90),
+    (0x16, 0xA3, 0x4A),
+];
+
+/// A color that is the same for the same sender name on every launch.
+pub fn avatar_rgb(name: &str) -> (u8, u8, u8) {
+    let hash = name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    AVATAR_PALETTE[hash as usize % AVATAR_PALETTE.len()]
+}
+
 /// Short list timestamp: time today, "Mon D" this year, otherwise "YYYY-MM-DD". Local time.
 pub fn format_list_date(ts: i64, now_ts: i64) -> String {
     format_list_date_in(&Local, ts, now_ts)

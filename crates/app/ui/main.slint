@@ -1,6 +1,6 @@
 import { Button, ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { AccentSwatch, MailIcon, NeuCard, NeuChip, NeuField, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
+import { AccentSwatch, Avatar, MailIcon, NeuCard, NeuChip, NeuField, NeuSwitch, TitleIconButton, ToolButton } from "widgets.slint";
 import { ComposeAttachment, ComposeDialog } from "compose.slint";
 import { ManageDialog, ManageLabel, ManageRule } from "manage.slint";
 
@@ -14,6 +14,8 @@ export struct MessageItem {
     unread: bool,
     starred: bool,
     has-attachment: bool,
+    initials: string,
+    avatar: color,
 }
 
 // kind: 0 = unified inbox, 1 = account header, 2 = folder
@@ -56,6 +58,7 @@ export component MainWindow inherits Window {
     in-out property <bool> filter-starred;
     in-out property <bool> filter-attachments;
     callback select-message(int);
+    callback close-reader();
     callback search-changed(string);
     callback filters-changed();
 
@@ -65,7 +68,9 @@ export component MainWindow inherits Window {
     in property <string> reader-error;
     in property <string> msg-subject;
     in property <string> msg-from;
-    in property <string> msg-to;
+    in property <string> msg-inbox;
+    in property <string> msg-initials;
+    in property <color> msg-avatar;
     in property <string> msg-date;
     in property <string> msg-labels;
     in property <bool> msg-starred: false;
@@ -258,9 +263,28 @@ export component MainWindow inherits Window {
                         padding: 10px;
                         spacing: 8px;
 
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: space-between;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                AccentSwatch { swatch: Theme.accent-palette[0]; selected: Theme.accent-index == 0; clicked => { Theme.accent-index = 0; } }
+                                AccentSwatch { swatch: Theme.accent-palette[1]; selected: Theme.accent-index == 1; clicked => { Theme.accent-index = 1; } }
+                                AccentSwatch { swatch: Theme.accent-palette[2]; selected: Theme.accent-index == 2; clicked => { Theme.accent-index = 2; } }
+                                AccentSwatch { swatch: Theme.accent-palette[3]; selected: Theme.accent-index == 3; clicked => { Theme.accent-index = 3; } }
+                            }
+                            NeuSwitch {
+                                checked: Theme.dark;
+                                toggled => {
+                                    Theme.dark = !Theme.dark;
+                                    Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+                                }
+                            }
+                        }
+
                         ListView {
                             for item in root.sidebar: Rectangle {
-                                width: 188px;
+                                width: 176px;
                                 height: 34px;
                                 border-radius: 10px;
                                 background: item.kind != 1 && root.selected-folder == item.folder-id ? Theme.accent-soft : transparent;
@@ -337,26 +361,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 8px;
 
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: space-between;
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    AccentSwatch { swatch: Theme.accent-palette[0]; selected: Theme.accent-index == 0; clicked => { Theme.accent-index = 0; } }
-                                    AccentSwatch { swatch: Theme.accent-palette[1]; selected: Theme.accent-index == 1; clicked => { Theme.accent-index = 1; } }
-                                    AccentSwatch { swatch: Theme.accent-palette[2]; selected: Theme.accent-index == 2; clicked => { Theme.accent-index = 2; } }
-                                    AccentSwatch { swatch: Theme.accent-palette[3]; selected: Theme.accent-index == 3; clicked => { Theme.accent-index = 3; } }
-                                }
-                                NeuSwitch {
-                                    checked: Theme.dark;
-                                    toggled => {
-                                        Theme.dark = !Theme.dark;
-                                        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
-                                    }
-                                }
-                            }
-
-                            ToolButton { text: "Refresh"; icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
+                            ToolButton { text: "Refresh";  icon: "sync"; tip: "Sync all accounts"; clicked => { root.refresh(); } }
                             ToolButton { text: "Compose"; icon: "compose"; tip: "New message (c)"; primary: true; clicked => { root.compose-new(); } }
                             ToolButton { text: "Manage"; icon: "settings"; tip: "Rules, labels and servers"; clicked => { root.manage-open(); keys.focus(); } }
                             ToolButton {
@@ -441,8 +446,17 @@ export component MainWindow inherits Window {
                                     background: Theme.accent;
                                 }
 
+                                Avatar {
+                                    x: 10px;
+                                    y: 10px;
+                                    initials: m.initials;
+                                    tint: m.avatar;
+                                }
+
                                 VerticalLayout {
                                     padding: 8px;
+                                    padding-left: 52px;
+                                    padding-right: 14px;
                                     spacing: 2px;
                                     HorizontalLayout {
                                         spacing: 6px;
@@ -552,17 +566,47 @@ export component MainWindow inherits Window {
                             color: Theme.text;
                             wrap: word-wrap;
                         }
-                        Text {
-                            text: "From: " + root.msg-from;
-                            font-size: 12px;
-                            color: Theme.text-dim;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: "To: " + root.msg-to;
-                            font-size: 12px;
-                            color: Theme.text-dim;
-                            overflow: elide;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background: back-area.has-hover ? Theme.well : transparent;
+                                MailIcon {
+                                    name: "arrow-left";
+                                    width: 16px;
+                                    height: 16px;
+                                    x: 6px;
+                                    y: 6px;
+                                    tint: Theme.text-dim;
+                                }
+                                back-area := TouchArea {
+                                    clicked => { root.close-reader(); }
+                                }
+                            }
+                            Avatar {
+                                initials: root.msg-initials;
+                                tint: root.msg-avatar;
+                            }
+                            VerticalLayout {
+                                spacing: 2px;
+                                alignment: center;
+                                Text {
+                                    text: root.msg-from;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: Theme.text;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: root.msg-inbox;
+                                    font-size: 12px;
+                                    color: Theme.text-dim;
+                                    overflow: elide;
+                                }
+                            }
                         }
                         if root.msg-labels != "": Text {
                             text: "Labels: " + root.msg-labels;
